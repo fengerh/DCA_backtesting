@@ -3,7 +3,7 @@ from tkinter import messagebox, scrolledtext, filedialog
 from tkcalendar import DateEntry
 import akshare as ak
 import pandas as pd
-from datetime import datetime
+from datetime import datetime,timedelta
 import threading
 import time
 import os
@@ -114,29 +114,52 @@ def create_excel(fund_list, start_date, end_date, output_file, log_callback):
             dividend_cache[str(year)] = pd.DataFrame()
     log_callback("🎉 分红数据缓存构建完成！\n")
 
+
     # --- 逐个处理基金数据 ---
     with pd.ExcelWriter(output_file, engine='openpyxl') as writer:
         for i, code in enumerate(fund_list):
             log_callback(f"正在处理 {code} ...")
             try:
                 df = get_fund_data_akshare(code, start_date, end_date, dividend_cache)
+                ws_name = code
                 if df.empty:
-                    placeholder.to_excel(writer, sheet_name=code, index=False)
+                    placeholder.to_excel(writer, sheet_name=ws_name, index=False)
+                    worksheet = writer.sheets[ws_name]
                     log_callback(f"  ⚠ {code} 无数据，已写入空表")
                 else:
-                    df.to_excel(writer, sheet_name=code, index=False)
+                    df.to_excel(writer, sheet_name=ws_name, index=False)
+                    worksheet = writer.sheets[ws_name]
                     log_callback(f"  ✅ {code} 完成，共 {len(df)} 条记录")
+                
+                # 自适应列宽
+                for column in worksheet.columns:
+                    max_length = 0
+                    column_letter = column[0].column_letter
+                    for cell in column:
+                        try:
+                            if cell.value:
+                                # 粗略计算显示宽度
+                                text = str(cell.value)
+                                length = sum(2 if '\u4e00' <= c <= '\u9fff' else 1 for c in text)
+                                if length > max_length:
+                                    max_length = length
+                        except:
+                            pass
+                    adjusted_width = max(max_length + 2, 10)
+                    worksheet.column_dimensions[column_letter].width = adjusted_width
+
             except Exception as e:
                 placeholder.to_excel(writer, sheet_name=code, index=False)
                 log_callback(f"  ❌ {code} 失败: {e}")
             time.sleep(0.5)
     log_callback(f"\n🎉 全部完成！文件已保存为：{output_file}")
 
+
 # ---------- GUI 界面 ----------
 class FundApp:
     def __init__(self, root):
         self.root = root
-        root.title("基金数据批量获取工具 v20260408.2207")
+        root.title("基金数据批量获取工具 v20260409.1033")
         root.geometry("550x550")
         root.resizable(True, True)
 
@@ -159,7 +182,7 @@ class FundApp:
         self.end_entry = DateEntry(date_frame, width=12, background='darkblue',
                                   foreground='white', borderwidth=2, date_pattern='yyyy-mm-dd')
         self.end_entry.grid(row=0, column=3, padx=5)
-        self.end_entry.set_date(datetime.now())
+        self.end_entry.set_date(datetime.now() - timedelta(days=1)) # 默认设置为昨天，避免当天数据不完整的问题
 
         # 输出文件名
         file_frame = tk.Frame(root)
@@ -170,7 +193,7 @@ class FundApp:
         self.out_entry.insert(0, f"基金数据_{datetime.now().strftime('%Y%m%d')}.xlsx")
 
         # 开始按钮
-        self.btn = tk.Button(root, text="🚀 开始获取", font=('微软雅黑', 11), bg='#2563eb', fg='white',
+        self.btn = tk.Button(root, text="🚀 开始获取", font=('微软雅黑', 11), bg="#2563eb", fg='white',
                              command=self.start_fetch)
         self.btn.pack(pady=15)
 
@@ -199,18 +222,16 @@ class FundApp:
         if not out.endswith('.xlsx'):
             out += '.xlsx'
         
-        # 检查文件是否存在，如果存在则让用户选择
-        if os.path.exists(out):
-            choice = messagebox.askyesnocancel("文件已存在", f"文件 '{out}' 已存在。\n\n是否覆盖？\n(选择“否”可另存为新文件)")
-            if choice is None:  # 取消
-                return
-            elif not choice:    # 否，则另存为
-                new_out = filedialog.asksaveasfilename(defaultextension=".xlsx", filetypes=[("Excel files", "*.xlsx")])
-                if new_out:
-                    out = new_out
-                else:
-                    return
-            # 如果选择“是”，则直接覆盖，不做任何操作
+        # 检查文件是否存在，如果存在则自动添加 _1, _2 ...
+        original_out = out
+        counter = 1
+        while os.path.exists(out):
+            name, ext = os.path.splitext(original_out)
+            out = f"{name}_{counter}{ext}"
+            counter += 1
+        if out != original_out:
+            self.log(f"⚠ 文件名已存在，将自动保存为：{out}")
+
 
         self.btn.config(state='disabled', text="获取中...")
         self.log_area.config(state='normal')
