@@ -1,23 +1,52 @@
-
 <!DOCTYPE html>
 <html lang="zh-CN">
 <head>
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
-    <title>基金组合回测工具 v20260408.1609</title>
+    <title>基金组合回测工具 v20260417.1710</title>
+    <!-- 依赖库 -->
     <script src="https://cdn.sheetjs.com/xlsx-0.20.1/package/dist/xlsx.full.min.js"></script>
     <script src="https://cdn.jsdelivr.net/npm/chart.js@4.4.1/dist/chart.umd.min.js"></script>
     <script src="https://cdn.tailwindcss.com"></script>
+    <script src="https://unpkg.com/dexie@3.2.3/dist/dexie.js"></script>
 </head>
 <body class="bg-gray-50 min-h-screen p-6">
     <div class="max-w-6xl mx-auto">
         <h1 class="text-3xl font-bold text-center mb-8 text-gray-800">📊 基金组合回测工具</h1>
 
-        <!-- 1. 上传文件 -->
+        <!-- 数据管理模块（基金 + 基准合并） -->
         <div class="bg-white p-6 rounded-xl shadow-md mb-6">
-            <h2 class="text-xl font-semibold mb-4 text-gray-700">1. 上传基金数据</h2>
-            <input type="file" id="fileInput" accept=".xlsx,.xls" class="block w-full text-sm text-gray-500 file:mr-4 file:py-2 file:px-4 file:rounded-lg file:border-0 file:text-sm file:font-semibold file:bg-blue-50 file:text-blue-700 hover:file:bg-blue-100 cursor-pointer">
-            <div id="fundInfo" class="mt-4 text-sm text-gray-600"></div>
+            <h2 class="text-xl font-semibold mb-4 text-gray-700 flex items-center gap-2">
+                📁 数据管理
+                <span class="text-sm font-normal text-gray-500 ml-2">(上传基金Excel / 基准Excel，每个Sheet为一个基准)</span>
+            </h2>
+            <div class="grid grid-cols-1 md:grid-cols-2 gap-6">
+                <!-- 左侧：基金数据上传 -->
+                <div class="border-r pr-6">
+                    <h3 class="text-lg font-medium mb-3 text-gray-700">📈 基金净值数据</h3>
+                    <input type="file" id="fileInput" accept=".xlsx,.xls" class="block w-full text-sm text-gray-500 file:mr-4 file:py-2 file:px-4 file:rounded-lg file:border-0 file:text-sm file:font-semibold file:bg-blue-50 file:text-blue-700 hover:file:bg-blue-100 cursor-pointer mb-3">
+                    <div id="fundInfo" class="text-sm text-gray-600"></div>
+                </div>
+                <!-- 右侧：基准数据上传 -->
+                <div>
+                    <h3 class="text-lg font-medium mb-3 text-gray-700">📊 基准指数数据</h3>
+                    <div class="grid grid-cols-1 gap-3">
+                        <input type="text" id="benchmarkName" placeholder="基准名称（单Sheet时可选）" value="沪深300" class="w-full p-2 border border-gray-300 rounded-lg">
+                        <input type="file" id="benchmarkFileInput" accept=".xlsx,.xls" class="block w-full text-sm text-gray-500 file:mr-4 file:py-2 file:px-4 file:rounded-lg file:border-0 file:text-sm file:font-semibold file:bg-green-50 file:text-green-700 hover:file:bg-green-100 cursor-pointer">
+                        <button id="uploadBenchmarkBtn" class="w-full bg-green-600 text-white px-4 py-2 rounded-lg hover:bg-green-700 transition">⬆️ 上传全部Sheet</button>
+                    </div>
+                </div>
+            </div>
+            <!-- 已保存基准列表 -->
+            <div class="mt-6 border-t pt-4">
+                <div class="flex items-center justify-between mb-2">
+                    <span class="text-sm font-medium text-gray-700">已保存的基准指数：</span>
+                    <span class="text-xs text-gray-500">点击单选即可在净值图中对比</span>
+                </div>
+                <div id="benchmarkList" class="space-y-2 max-h-52 overflow-y-auto border rounded-lg p-2 bg-gray-50">
+                    <!-- 动态渲染 -->
+                </div>
+            </div>
         </div>
 
         <!-- 2. 添加计划 -->
@@ -73,7 +102,7 @@
             
             <div id="metrics" class="grid grid-cols-1 md:grid-cols-3 gap-4 mb-6"></div>
             
-            <!-- 新增：图表日期范围筛选 -->
+            <!-- 图表日期范围筛选 -->
             <div class="bg-gray-50 p-4 rounded-lg mb-6" id="chartFilter" style="display:none;">
                 <h3 class="text-lg font-semibold mb-3 text-gray-700">图表日期范围筛选</h3>
                 <div class="grid grid-cols-1 md:grid-cols-2 gap-4">
@@ -88,10 +117,19 @@
                 </div>
             </div>
             
-            <!-- 图表上下排列：净值在上，总资产在下 -->
+            <!-- 基准切换 -->
+            <div class="mb-4 flex items-center gap-3" id="benchmarkSelectorWrapper" style="display:none;">
+                <label class="text-sm font-medium text-gray-700">对比基准：</label>
+                <select id="benchmarkSelect" class="p-2 border border-gray-500 rounded-lg bg-white shadow-sm w-60">
+                    <option value="">-- 无 --</option>
+                </select>
+                <span class="text-xs text-gray-500">虚线为基准净值曲线</span>
+            </div>
+
+            <!-- 图表 -->
             <div class="space-y-8 mt-8">
                 <div>
-                    <h3 class="text-lg font-semibold mb-2 text-gray-700">组合净值曲线（不受定投影响）</h3>
+                    <h3 class="text-lg font-semibold mb-2 text-gray-700">组合净值 vs 基准（起点统一）</h3>
                     <canvas id="netValueChart"></canvas>
                 </div>
                 <div>
@@ -103,7 +141,7 @@
     </div>
 
     <script>
-        // 全局变量
+        // ---------- 全局变量 ----------
         let fundsData = {};
         let investmentPlans = [];
         let assetChart = null;
@@ -111,14 +149,14 @@
         const RISK_FREE_RATE = 0.025;
         const MIN_TRADE_DAYS = 30;
         
-        // 回测结果全局缓存（用于图表动态筛选）
-        let backtestResult = {
-            dates: [],
-            assets: [],
-            netValues: []
-        };
+        let backtestResult = { dates: [], assets: [], netValues: [] };
 
-        // 工具函数：格式化日期
+        // IndexedDB
+        const db = new Dexie('BenchmarkDB');
+        db.version(1).stores({ benchmarks: '++id, name' });
+        let currentBenchmarkId = null;
+
+        // 工具函数：格式化日期为 yyyy-mm-dd
         function formatDate(date) {
             const year = date.getFullYear();
             const month = String(date.getMonth() + 1).padStart(2, '0');
@@ -126,60 +164,201 @@
             return `${year}-${month}-${day}`;
         }
 
-        // XIRR计算
+        // 增强的日期解析：支持 yyyy-mm-dd 和 yyyy/m/d 格式（月日可带或不带前导零）
+        function parseDateString(str) {
+            if (!str || typeof str !== 'string') return new Date(NaN);
+            str = str.trim();
+            // 尝试 '-' 分隔
+            let parts = str.split('-');
+            if (parts.length === 3) {
+                let year = parseInt(parts[0]), month = parseInt(parts[1])-1, day = parseInt(parts[2]);
+                if (!isNaN(year) && !isNaN(month) && !isNaN(day) && month >= 0 && month <= 11 && day >= 1 && day <= 31) {
+                    return new Date(year, month, day);
+                }
+            }
+            // 尝试 '/' 分隔
+            parts = str.split('/');
+            if (parts.length === 3) {
+                let year = parseInt(parts[0]), month = parseInt(parts[1])-1, day = parseInt(parts[2]);
+                if (!isNaN(year) && !isNaN(month) && !isNaN(day) && month >= 0 && month <= 11 && day >= 1 && day <= 31) {
+                    return new Date(year, month, day);
+                }
+            }
+            return new Date(NaN);
+        }
+
+        // 基准列表渲染（含日期范围）
+        async function loadBenchmarkList() {
+            const benchmarks = await db.benchmarks.toArray();
+            const container = document.getElementById('benchmarkList');
+            const select = document.getElementById('benchmarkSelect');
+            
+            if (benchmarks.length === 0) {
+                container.innerHTML = '<p class="text-gray-400 text-sm text-center py-2">暂无基准，请上传 Excel 文件</p>';
+            } else {
+                container.innerHTML = benchmarks.map(b => {
+                    const firstDate = b.data[0]?.date || '?';
+                    const lastDate = b.data[b.data.length-1]?.date || '?';
+                    return `
+                    <div class="flex items-center justify-between bg-white p-2 rounded border">
+                        <div class="flex items-center gap-2">
+                            <input type="radio" name="activeBenchmark" value="${b.id}" ${currentBenchmarkId == b.id ? 'checked' : ''} class="benchmark-radio">
+                            <div>
+                                <span class="text-sm font-medium">${b.name}</span>
+                                <span class="text-xs text-gray-500 ml-2">${firstDate} ~ ${lastDate}</span>
+                                <span class="text-xs text-gray-400 ml-1">(${b.data.length}条)</span>
+                            </div>
+                        </div>
+                        <button class="text-red-500 hover:text-red-700 text-sm delete-benchmark" data-id="${b.id}">删除</button>
+                    </div>
+                `}).join('');
+            }
+
+            select.innerHTML = '<option value="">-- 无 --</option>';
+            benchmarks.forEach(b => {
+                const option = document.createElement('option');
+                option.value = b.id;
+                option.textContent = `${b.name} (${b.data[0]?.date?.slice(0,7) || ''})`;
+                if (currentBenchmarkId == b.id) option.selected = true;
+                select.appendChild(option);
+            });
+
+            document.querySelectorAll('.benchmark-radio').forEach(radio => {
+                radio.addEventListener('change', (e) => {
+                    currentBenchmarkId = parseInt(e.target.value);
+                    select.value = currentBenchmarkId;
+                    if (backtestResult.dates.length) updateCharts();
+                });
+            });
+            document.querySelectorAll('.delete-benchmark').forEach(btn => {
+                btn.addEventListener('click', async (e) => {
+                    const id = parseInt(e.target.dataset.id);
+                    if (confirm('确定删除该基准吗？')) {
+                        await db.benchmarks.delete(id);
+                        if (currentBenchmarkId === id) { currentBenchmarkId = null; select.value = ''; }
+                        await loadBenchmarkList();
+                        if (backtestResult.dates.length) updateCharts();
+                    }
+                });
+            });
+            select.onchange = () => {
+                currentBenchmarkId = select.value ? parseInt(select.value) : null;
+                document.querySelectorAll('.benchmark-radio').forEach(r => r.checked = r.value == select.value);
+                if (backtestResult.dates.length) updateCharts();
+            };
+        }
+
+        // 解析Sheet数据
+        function parseSheetData(sheet) {
+            const json = XLSX.utils.sheet_to_json(sheet, { header: 1, raw: false });
+            if (json.length < 2) return [];
+            const data = [];
+            for (let i = 1; i < json.length; i++) {
+                const row = json[i];
+                if (!row || row.length < 2) continue;
+                let rawDate = row[0];
+                let nav = parseFloat(row[1]);
+                if (isNaN(nav)) continue;
+                
+                let date;
+                if (rawDate instanceof Date) {
+                    date = rawDate;
+                } else if (typeof rawDate === 'string') {
+                    // 先尝试解析字符串日期
+                    date = parseDateString(rawDate);
+                    if (isNaN(date.getTime())) {
+                        // 如果字符串看起来像纯数字（Excel序列），再尝试转换
+                        if (/^\d+$/.test(rawDate)) {
+                            const excelNum = parseInt(rawDate);
+                            date = new Date((excelNum - 25569) * 86400 * 1000);
+                        }
+                    }
+                } else if (typeof rawDate === 'number') {
+                    date = new Date((rawDate - 25569) * 86400 * 1000);
+                }
+                
+                if (!date || isNaN(date.getTime())) continue;
+                data.push({ date: formatDate(date), nav });
+            }
+            data.sort((a,b) => a.date.localeCompare(b.date));
+            return data;
+        }
+
+        // 上传基准
+        document.getElementById('uploadBenchmarkBtn').addEventListener('click', async () => {
+            const fileInput = document.getElementById('benchmarkFileInput');
+            const nameInput = document.getElementById('benchmarkName');
+            const file = fileInput.files[0];
+            if (!file) { alert('请选择 Excel 文件'); return; }
+            const reader = new FileReader();
+            reader.onload = async (e) => {
+                const data = new Uint8Array(e.target.result);
+                const workbook = XLSX.read(data, { type: 'array', cellDates: true });
+                const sheetNames = workbook.SheetNames;
+                if (sheetNames.length === 0) { alert('Excel 文件中没有 Sheet'); return; }
+                let importCount = 0;
+                for (const sheetName of sheetNames) {
+                    const sheet = workbook.Sheets[sheetName];
+                    const parsed = parseSheetData(sheet);
+                    if (parsed.length === 0) continue;
+                    let benchmarkName = sheetName;
+                    if (sheetNames.length === 1) {
+                        const custom = nameInput.value.trim();
+                        if (custom) benchmarkName = custom;
+                    }
+                    await db.benchmarks.add({ name: benchmarkName, data: parsed });
+                    importCount++;
+                }
+                if (importCount === 0) alert('未解析到有效数据，请检查日期列格式（支持yyyy-mm-dd或yyyy/m/d）');
+                else alert(`成功导入 ${importCount} 个基准`);
+                fileInput.value = '';
+                nameInput.value = '沪深300';
+                await loadBenchmarkList();
+            };
+            reader.readAsArrayBuffer(file);
+        });
+
+        loadBenchmarkList();
+
+        // XIRR
         function xirr(cashFlows, dates, guess = 0.1) {
             if (cashFlows.length !== dates.length || cashFlows.length < 2) return NaN;
-            
-            // 配对并按日期排序
             const paired = cashFlows.map((cf, i) => ({ cf, date: dates[i] }));
             paired.sort((a, b) => a.date - b.date);
             const sortedFlows = paired.map(p => p.cf);
             const sortedDates = paired.map(p => p.date);
-            
-            const maxIterations = 100;
-            const tolerance = 1e-6;
+            const maxIterations = 100, tolerance = 1e-6;
             let rate = guess;
-            
             for (let i = 0; i < maxIterations; i++) {
-                let npv = 0;
-                let npvDerivative = 0;
+                let npv = 0, npvDerivative = 0;
                 const baseDate = sortedDates[0];
-                
                 for (let j = 0; j < sortedFlows.length; j++) {
                     const days = (sortedDates[j] - baseDate) / (1000 * 60 * 60 * 24);
                     const term = Math.pow(1 + rate, days / 365);
                     npv += sortedFlows[j] / term;
                     npvDerivative -= sortedFlows[j] * days / 365 * Math.pow(1 + rate, days / 365 - 1);
                 }
-                
                 if (Math.abs(npv) < tolerance) return rate;
                 if (Math.abs(npvDerivative) < tolerance) break;
-                
                 rate -= npv / npvDerivative;
             }
             return NaN;
-}
-        // 解析Excel文件
+        }
+
+        // 基金上传
         document.getElementById('fileInput').addEventListener('change', function(e) {
             const file = e.target.files[0];
             if (!file) return;
-
             const reader = new FileReader();
             reader.onload = function(e) {
                 const data = new Uint8Array(e.target.result);
                 const workbook = XLSX.read(data, {type: 'array', cellDates: true});
-                
                 fundsData = {};
-                let infoHtml = '<div class="font-medium text-green-600 mb-2">✅ 成功加载以下基金：</div><ul class="list-disc list-inside space-y-1">';
-                
+                let infoHtml = '<div class="font-medium text-green-600 mb-2">✅ 已加载基金：</div><ul class="list-disc list-inside space-y-1">';
                 workbook.SheetNames.forEach(name => {
                     const sheet = workbook.Sheets[name];
                     const json = XLSX.utils.sheet_to_json(sheet, {header: 1, raw: false});
-                    
-                    const dates = [];
-                    const nav = [];
-                    const div = [];
-                    
+                    const dates = [], nav = [], div = [];
                     for (let i = 1; i < json.length; i++) {
                         if (json[i][0] && json[i][1] !== undefined) {
                             const date = new Date(json[i][0]);
@@ -190,7 +369,6 @@
                             }
                         }
                     }
-                    
                     if (dates.length > 0) {
                         const minDate = formatDate(dates[0]);
                         const maxDate = formatDate(dates[dates.length-1]);
@@ -198,11 +376,8 @@
                         infoHtml += `<li><strong>${name}</strong>：${minDate} ~ ${maxDate}</li>`;
                     }
                 });
-                
                 infoHtml += '</ul>';
                 document.getElementById('fundInfo').innerHTML = infoHtml;
-                
-                // 初始化下拉框
                 const fundSelect = document.getElementById('fundSelect');
                 fundSelect.innerHTML = '';
                 Object.keys(fundsData).forEach(code => {
@@ -211,8 +386,6 @@
                     option.textContent = code;
                     fundSelect.appendChild(option);
                 });
-                
-                // 初始化第一个基金的日期范围
                 const firstFund = fundsData[Object.keys(fundsData)[0]];
                 document.getElementById('startDate').value = firstFund.minDate;
                 document.getElementById('startDate').min = firstFund.minDate;
@@ -220,8 +393,6 @@
                 document.getElementById('endDate').value = firstFund.maxDate;
                 document.getElementById('endDate').min = firstFund.minDate;
                 document.getElementById('endDate').max = firstFund.maxDate;
-                
-                // 显示后续模块
                 document.getElementById('planSection').style.display = 'block';
                 document.getElementById('planListSection').style.display = 'block';
                 document.getElementById('resultSection').style.display = 'block';
@@ -229,26 +400,19 @@
             reader.readAsArrayBuffer(file);
         });
 
-        // 选择基金自动同步日期范围
         document.getElementById('fundSelect').addEventListener('change', function() {
-            const selectedFund = this.value;
-            const fund = fundsData[selectedFund];
-            
+            const fund = fundsData[this.value];
             document.getElementById('startDate').value = fund.minDate;
             document.getElementById('startDate').min = fund.minDate;
             document.getElementById('startDate').max = fund.maxDate;
-            
             document.getElementById('endDate').value = fund.maxDate;
             document.getElementById('endDate').min = fund.minDate;
             document.getElementById('endDate').max = fund.maxDate;
         });
-
-        // 投资类型切换
         document.getElementById('invType').addEventListener('change', function() {
             document.getElementById('endDateDiv').style.display = this.value === 'single' ? 'none' : 'block';
         });
 
-        // 管理投资计划
         function addPlan() {
             const fund = document.getElementById('fundSelect').value;
             const type = document.getElementById('invType').value;
@@ -256,481 +420,282 @@
             const endDate = document.getElementById('endDate').value;
             const amount = parseFloat(document.getElementById('amount').value);
             const div = document.getElementById('divMethod').value;
-            
-            if (!fund || !startDate || amount <= 0) {
-                alert('请填写完整信息！');
-                return;
-            }
-            
-            const plan = {
-                id: Date.now(),
-                fund,
-                type,
-                startDate,
-                endDate: type === 'single' ? startDate : endDate,
-                amount,
-                div
-            };
-            
-            // 🔁 检查是否已存在同基金计划，若存在则覆盖
+            if (!fund || !startDate || amount <= 0) { alert('请填写完整信息！'); return; }
+            const plan = { id: Date.now(), fund, type, startDate, endDate: type === 'single' ? startDate : endDate, amount, div };
             const existingIndex = investmentPlans.findIndex(p => p.fund === fund);
             if (existingIndex !== -1) {
-                if (!confirm(`基金 ${fund} 已有投资计划，是否用新计划覆盖？`)) {
-                    return;  // 取消则不覆盖
-                }
+                if (!confirm(`基金 ${fund} 已有计划，是否覆盖？`)) return;
                 investmentPlans[existingIndex] = plan;
-            } else {
-                investmentPlans.push(plan);             // 新增
-            }
-            
-            renderPlanList();
-        }           
-
-
-        function deletePlan(id) {
-            investmentPlans = investmentPlans.filter(p => p.id !== id);
+            } else investmentPlans.push(plan);
             renderPlanList();
         }
-
-        function clearAllPlans() {
-            if (confirm('确定清空所有计划吗？')) {
-                investmentPlans = [];
-                renderPlanList();
-            }
-        }
-
-        // 渲染投资计划列表
+        function deletePlan(id) { investmentPlans = investmentPlans.filter(p => p.id !== id); renderPlanList(); }
+        function clearAllPlans() { if (confirm('清空所有计划？')) { investmentPlans = []; renderPlanList(); } }
         function renderPlanList() {
             const container = document.getElementById('planList');
-            if (investmentPlans.length === 0) {
-                container.innerHTML = '<p class="text-gray-500 text-sm">暂无计划</p>';
-                return;
-            }
-            
+            if (investmentPlans.length === 0) { container.innerHTML = '<p class="text-gray-500 text-sm">暂无计划</p>'; return; }
             container.innerHTML = investmentPlans.map((p, i) => {
                 const typeText = p.type === 'single' ? '单笔' : p.type === 'weekly' ? '每周定投' : '每月定投';
                 const divText = p.div === 'reinvest' ? '红利再投资' : '现金分红';
                 const dateText = p.type === 'single' ? p.startDate : `${p.startDate}~${p.endDate}`;
-                
-                return `
-                <div class="flex justify-between items-center p-3 bg-gray-50 rounded-lg">
-                    <div class="text-sm">
-                        <span class="font-medium">${i+1}.</span> 
-                        <strong>${p.fund}</strong> | ${typeText} | ${p.amount.toFixed(0)}元 | ${dateText} | 【${divText}】
-                    </div>
+                return `<div class="flex justify-between items-center p-3 bg-gray-50 rounded-lg">
+                    <div class="text-sm"><span class="font-medium">${i+1}.</span> <strong>${p.fund}</strong> | ${typeText} | ${p.amount.toFixed(0)}元 | ${dateText} | 【${divText}】</div>
                     <button onclick="deletePlan(${p.id})" class="text-red-500 hover:text-red-700 text-sm font-medium">删除</button>
-                </div>
-            `}).join('');
+                </div>`;
+            }).join('');
         }
 
-        // ✅ 新增：更新图表（根据选择的日期范围）
-        function updateCharts() {
-            const startDate = new Date(document.getElementById('chartStartDate').value);
-            const endDate = new Date(document.getElementById('chartEndDate').value);
-            
-            // 过滤数据
-            const filteredData = backtestResult.dates.map((d, i) => ({
-                date: d,
-                asset: backtestResult.assets[i],
-                netValue: backtestResult.netValues[i]
-            })).filter(item => item.date >= startDate && item.date <= endDate);
-            
-            const chartDates = filteredData.map(d => formatDate(d.date));
-            const chartAssets = filteredData.map(d => d.asset);
-            const chartNetValues = filteredData.map(d => d.netValue);
-            
-            // 更新净值曲线
-            if (netValueChart) {
-                netValueChart.data.labels = chartDates;
-                netValueChart.data.datasets[0].data = chartNetValues;
-                netValueChart.update();
-            }
-            
-            // 更新总资产曲线
-            if (assetChart) {
-                assetChart.data.labels = chartDates;
-                assetChart.data.datasets[0].data = chartAssets;
-                assetChart.update();
-            }
-        }
+        // 核心回测（保持不变）
+        function runBacktest() {
+            if (investmentPlans.length === 0) { alert('请先添加投资计划！'); return; }
+            const fundShares = {}; Object.keys(fundsData).forEach(code => fundShares[code] = 0);
+            let totalCash = 0;
+            const dailyAsset = [], dailyDates = [], dailyInvest = [];
+            const cashFlows = [], flowDates = [];
 
-// 核心回测逻辑
-// 辅助函数：转为 UTC 午夜时间（用于日期比较）
-function toUTCDateOnly(date) {
-    return new Date(Date.UTC(date.getFullYear(), date.getMonth(), date.getDate()));
-}
+            const allDatesSet = new Set();
+            Object.values(fundsData).forEach(f => f.dates.forEach(d => allDatesSet.add(formatDate(d))));
+            const allDateStrs = Array.from(allDatesSet).sort();
+            const allDates = allDateStrs.map(str => new Date(str + 'T00:00:00'));
+            const earliestInvestDate = new Date(Math.min(...investmentPlans.map(p => new Date(p.startDate).getTime())));
 
-function runBacktest() {
-    if (investmentPlans.length === 0) {
-        alert('请先添加投资计划！');
-        return;
-    }
-
-    // ---------- 初始化 ----------
-    const fundShares = {};
-    Object.keys(fundsData).forEach(code => fundShares[code] = 0);
-    
-    let totalCash = 0;
-    const dailyAsset = [];
-    const dailyDates = [];
-    const dailyInvest = [];
-
-    // 现金流数组（不做任何合并，直接记录）
-    const cashFlows = [];
-    const flowDates = [];
-
-    // 获取所有交易日
-    const allDatesSet = new Set();
-    Object.values(fundsData).forEach(f => f.dates.forEach(d => allDatesSet.add(formatDate(d))));
-    const allDateStrs = Array.from(allDatesSet).sort();
-    const allDates = allDateStrs.map(str => new Date(str + 'T00:00:00')); // 强制午夜时间
-
-    const earliestInvestDate = new Date(Math.min(...investmentPlans.map(p => new Date(p.startDate).getTime())));
-
-    // ---------- 逐日模拟 ----------
-    for (let dtIdx = 0; dtIdx < allDates.length; dtIdx++) {
-        const currentDt = allDates[dtIdx];
-        const dateStr = allDateStrs[dtIdx];
-        let dailyInv = 0;
-
-        // 1. 处理分红
-        for (const plan of investmentPlans) {
-            const fund = plan.fund;
-            const fundData = fundsData[fund];
-            const fundDateIdx = fundData.dates.findIndex(d => formatDate(d) === dateStr);
-            if (fundDateIdx === -1) continue;
-            
-            const divPerShare = fundData.div[fundDateIdx];
-            const nav = fundData.nav[fundDateIdx];
-            
-            if (fundShares[fund] > 0 && divPerShare > 0) {
-                const totalDiv = fundShares[fund] * divPerShare;
-                if (plan.div === 'reinvest') {
-                    fundShares[fund] += totalDiv / nav;
-                } else {
-                    totalCash += totalDiv;
-                    // 记录现金分红（正值）
-                    cashFlows.push(totalDiv);
-                    flowDates.push(new Date(currentDt));
+            for (let dtIdx = 0; dtIdx < allDates.length; dtIdx++) {
+                const currentDt = allDates[dtIdx];
+                const dateStr = allDateStrs[dtIdx];
+                let dailyInv = 0;
+                for (const plan of investmentPlans) {
+                    const fund = plan.fund;
+                    const fundData = fundsData[fund];
+                    const fundDateIdx = fundData.dates.findIndex(d => formatDate(d) === dateStr);
+                    if (fundDateIdx === -1) continue;
+                    const divPerShare = fundData.div[fundDateIdx];
+                    const nav = fundData.nav[fundDateIdx];
+                    if (fundShares[fund] > 0 && divPerShare > 0) {
+                        const totalDiv = fundShares[fund] * divPerShare;
+                        if (plan.div === 'reinvest') fundShares[fund] += totalDiv / nav;
+                        else { totalCash += totalDiv; cashFlows.push(totalDiv); flowDates.push(new Date(currentDt)); }
+                    }
                 }
-            }
-        }
-
-        // 2. 执行投资（判断逻辑改为字符串比较，彻底避免时区）
-        for (const plan of investmentPlans) {
-            const fund = plan.fund;
-            const fundData = fundsData[fund];
-            const fundDateIdx = fundData.dates.findIndex(d => formatDate(d) === dateStr);
-            if (fundDateIdx === -1) continue;
-            
-            const nav = fundData.nav[fundDateIdx];
-            const amt = plan.amount;
-            const startStr = plan.startDate;
-            const endStr = plan.endDate;
-            
-            // 提取日期部分进行字符串比较
-            const currentDateStr = dateStr;
-            
-            let shouldInvest = false;
-            if (plan.type === 'single') {
-                if (currentDateStr === startStr) shouldInvest = true;
-            } else if (plan.type === 'weekly') {
-                if (currentDateStr >= startStr && currentDateStr <= endStr) {
-                    const d = new Date(currentDateStr + 'T00:00:00');
-                    if (d.getUTCDay() === 1) shouldInvest = true; // 周一（UTC）
-                }
-            } else if (plan.type === 'monthly') {
-                if (currentDateStr >= startStr && currentDateStr <= endStr) {
-                    const day = parseInt(currentDateStr.split('-')[2]);
-                    if (day === 1) shouldInvest = true;
-                }
-            }
-
-            if (shouldInvest) {
-                fundShares[fund] += amt / nav;
-                dailyInv += amt;
-                // 记录投入（负值）
-                cashFlows.push(-amt);
-                flowDates.push(new Date(currentDt));
-            }
-        }
-
-        // 3. 记录每日总资产
-        let mv = 0;
-        for (const code of Object.keys(fundShares)) {
-            const fundData = fundsData[code];
-            const idx = fundData.dates.findIndex(d => formatDate(d) === dateStr);
-            if (idx !== -1) {
-                mv += fundShares[code] * fundData.nav[idx];
-            }
-        }
-        dailyAsset.push(mv + totalCash);
-        dailyDates.push(new Date(currentDt));
-        dailyInvest.push(dailyInv);
-    }
-
-    // ---------- 计算终值 ----------
-    let marketValue = 0;
-    for (const code of Object.keys(fundShares)) {
-        const fundData = fundsData[code];
-        const lastNav = fundData.nav[fundData.nav.length - 1];
-        marketValue += fundShares[code] * lastNav;
-    }
-    const cashDiv = totalCash;
-    const totalAsset = marketValue + cashDiv;
-
-    // 终值现金流（正值）
-    // 终值现金流应为持仓市值（现金已在分红时记录过）
-    cashFlows.push(marketValue);
-    flowDates.push(dailyDates[dailyDates.length - 1]);
-
-    // 总投入
-    const totalInvest = -cashFlows.reduce((sum, v) => sum + (v < 0 ? v : 0), 0);
-    const totalReturn = totalInvest > 0 ? (totalAsset / totalInvest - 1) * 100 : 0;
-
-    // XIRR 计算
-    // 确保现金流按日期排序（虽然逐日 push 通常有序，但以防万一）
-    const combined = flowDates.map((d, i) => ({ date: d, cf: cashFlows[i] }));
-    combined.sort((a, b) => a.date - b.date);
-    const sortedFlowDates = combined.map(c => c.date);
-    const sortedCashFlows = combined.map(c => c.cf);
-    const xirrVal = xirr(sortedCashFlows, sortedFlowDates) * 100;
-
-
-    // 调试输出（关键！）
-    console.log('=== 现金流明细 ===');
-    flowDates.forEach((d, i) => {
-        console.log(`${formatDate(d)} : ${cashFlows[i].toFixed(2)}`);
-    });
-    console.log('总投入:', totalInvest.toFixed(2), '总资产:', totalAsset.toFixed(2));
-    console.log('累计收益率:', totalReturn.toFixed(2) + '%', 'XIRR:', xirrVal.toFixed(2) + '%');
-
-    // ---------- 净值曲线与风险指标（以下保持你原有代码不变）----------
-    // 这里粘贴你原来的净值计算、风险指标展示、图表绘制代码
-    // 我在此省略，但你必须将之前完整代码中从 "let annualVolatility = NaN;" 到图表绘制结束的部分放在这里
-    // ...
-
-
-
-    // 6. 计算净值曲线和风险指标
-    let annualVolatility = NaN;
-    let sharpeRatio = NaN;
-    let calmarRatio = NaN;
-    let maxDrawdown = 0;
-    let netValues = [];
-
-    const startIdx = dailyDates.findIndex(d => d >= earliestInvestDate);
-    const validDates = dailyDates.slice(startIdx);
-    const validAssets = dailyAsset.slice(startIdx);
-    const validInvest = dailyInvest.slice(startIdx);
-
-    if (validDates.length >= MIN_TRADE_DAYS) {
-        netValues = [1.0];
-        for (let i = 1; i < validAssets.length; i++) {
-            const yesterdayAsset = validAssets[i-1];
-            const todayAsset = validAssets[i];
-            const todayInvest = validInvest[i];
-            
-            if (yesterdayAsset > 0) {
-                const dailyReturn = (todayAsset - todayInvest) / yesterdayAsset;
-                netValues.push(netValues[i-1] * dailyReturn);
-            } else {
-                netValues.push(1.0);
-            }
-        }
-
-        const dailyReturns = [];
-        for (let i = 1; i < netValues.length; i++) {
-            dailyReturns.push((netValues[i] - netValues[i-1]) / netValues[i-1]);
-        }
-
-        const totalDays = (validDates[validDates.length-1] - validDates[0]) / (1000 * 60 * 60 * 24);
-        const annualReturn = Math.pow(netValues[netValues.length-1], 365/totalDays) - 1;
-
-        const mean = dailyReturns.reduce((a,b) => a+b, 0) / dailyReturns.length;
-        const variance = dailyReturns.reduce((a,b) => a + Math.pow(b - mean, 2), 0) / dailyReturns.length;
-        const dailyVolatility = Math.sqrt(variance);
-        annualVolatility = dailyVolatility * Math.sqrt(252);
-
-        let peak = netValues[0];
-        for (const v of netValues) {
-            if (v > peak) peak = v;
-            const dd = (v - peak) / peak;
-            if (dd < maxDrawdown) maxDrawdown = dd;
-        }
-        maxDrawdown *= 100;
-
-        if (annualVolatility > 0) {
-            sharpeRatio = (annualReturn - RISK_FREE_RATE) / annualVolatility;
-        }
-        if (maxDrawdown !== 0) {
-            calmarRatio = annualReturn / Math.abs(maxDrawdown/100);
-        }
-    }
-
-    // 7. 缓存结果
-    backtestResult = {
-        dates: validDates,
-        assets: validAssets,
-        netValues: netValues
-    };
-
-    // 8. 展示指标
-    let riskMetricsHtml = '';
-    if (validDates.length >= MIN_TRADE_DAYS) {
-        riskMetricsHtml = `
-            <div class="bg-red-50 p-4 rounded-lg text-center">
-                <div class="text-sm text-gray-600">最大回撤</div>
-                <div class="text-2xl font-bold text-red-700">${maxDrawdown.toFixed(2)}%</div>
-            </div>
-            <div class="bg-orange-50 p-4 rounded-lg text-center">
-                <div class="text-sm text-gray-600">年化波动率</div>
-                <div class="text-2xl font-bold text-orange-700">${(annualVolatility * 100).toFixed(2)}%</div>
-            </div>
-            <div class="bg-teal-50 p-4 rounded-lg text-center">
-                <div class="text-sm text-gray-600">夏普比率 / 卡玛比率</div>
-                <div class="text-2xl font-bold text-teal-700">
-                    ${sharpeRatio.toFixed(2)} / ${calmarRatio.toFixed(2)}
-                </div>
-            </div>
-        `;
-    } else {
-        riskMetricsHtml = `
-            <div class="bg-gray-100 p-4 rounded-lg text-center col-span-3">
-                <div class="text-sm text-gray-600">风险指标</div>
-                <div class="text-xl font-medium text-gray-500">投资时间不足${MIN_TRADE_DAYS}个交易日，暂不计算</div>
-            </div>
-        `;
-    }
-
-    document.getElementById('metrics').innerHTML = `
-        <div class="bg-blue-50 p-4 rounded-lg text-center">
-            <div class="text-sm text-gray-600">总投入本金</div>
-            <div class="text-2xl font-bold text-blue-700">${totalInvest.toFixed(2)} 元</div>
-        </div>
-        <div class="bg-green-50 p-4 rounded-lg text-center">
-            <div class="text-sm text-gray-600">持仓市值</div>
-            <div class="text-2xl font-bold text-green-700">${marketValue.toFixed(2)} 元</div>
-        </div>
-        <div class="bg-yellow-50 p-4 rounded-lg text-center">
-            <div class="text-sm text-gray-600">累计现金分红</div>
-            <div class="text-2xl font-bold text-yellow-700">${cashDiv.toFixed(2)} 元</div>
-        </div>
-        <div class="bg-purple-50 p-4 rounded-lg text-center">
-            <div class="text-sm text-gray-600">总资产</div>
-            <div class="text-2xl font-bold text-purple-700">${totalAsset.toFixed(2)} 元</div>
-        </div>
-        <div class="bg-indigo-50 p-4 rounded-lg text-center">
-            <div class="text-sm text-gray-600">累计收益率</div>
-            <div class="text-2xl font-bold text-indigo-700">${totalReturn.toFixed(2)}%</div>
-        </div>
-        <div class="bg-pink-50 p-4 rounded-lg text-center">
-            <div class="text-sm text-gray-600">XIRR真实年化</div>
-            <div class="text-2xl font-bold text-pink-700">${isNaN(xirrVal) ? '-' : xirrVal.toFixed(2) + '%'}</div>
-        </div>
-        ${riskMetricsHtml}
-    `;
-
-    // 9. 图表日期筛选器
-    if (validDates.length > 0) {
-        document.getElementById('chartFilter').style.display = 'block';
-        const minDate = formatDate(validDates[0]);
-        const maxDate = formatDate(validDates[validDates.length-1]);
-        
-        document.getElementById('chartStartDate').value = minDate;
-        document.getElementById('chartStartDate').min = minDate;
-        document.getElementById('chartStartDate').max = maxDate;
-        
-        document.getElementById('chartEndDate').value = maxDate;
-        document.getElementById('chartEndDate').min = minDate;
-        document.getElementById('chartEndDate').max = maxDate;
-        
-        document.getElementById('chartStartDate').onchange = updateCharts;
-        document.getElementById('chartEndDate').onchange = updateCharts;
-    }
-
-    // 10. 绘制图表
-    const chartDates = validDates.map(d => formatDate(d));
-    
-    const netValueCtx = document.getElementById('netValueChart').getContext('2d');
-    if (netValueChart) netValueChart.destroy();
-    
-    if (netValues.length > 0) {
-        netValueChart = new Chart(netValueCtx, {
-            type: 'line',
-            data: {
-                labels: chartDates,
-                datasets: [{
-                    label: '净值',
-                    data: netValues,
-                    borderColor: '#10b981',
-                    backgroundColor: 'rgba(16, 185, 129, 0.1)',
-                    fill: true,
-                    tension: 0.1,
-                    pointRadius: 0,
-                    pointHoverRadius: 6
-                }]
-            },
-            options: {
-                responsive: true,
-                interaction: { mode: 'index', intersect: false },
-                plugins: {
-                    legend: { display: false },
-                    tooltip: {
-                        mode: 'index',
-                        intersect: false,
-                        callbacks: {
-                            label: (ctx) => `净值: ${ctx.raw.toFixed(4)}`
+                for (const plan of investmentPlans) {
+                    const fund = plan.fund;
+                    const fundData = fundsData[fund];
+                    const fundDateIdx = fundData.dates.findIndex(d => formatDate(d) === dateStr);
+                    if (fundDateIdx === -1) continue;
+                    const nav = fundData.nav[fundDateIdx];
+                    const amt = plan.amount;
+                    const currentDateStr = dateStr;
+                    let shouldInvest = false;
+                    if (plan.type === 'single') { if (currentDateStr === plan.startDate) shouldInvest = true; }
+                    else if (plan.type === 'weekly') {
+                        if (currentDateStr >= plan.startDate && currentDateStr <= plan.endDate) {
+                            const d = new Date(currentDateStr + 'T00:00:00');
+                            if (d.getUTCDay() === 1) shouldInvest = true;
+                        }
+                    } else if (plan.type === 'monthly') {
+                        if (currentDateStr >= plan.startDate && currentDateStr <= plan.endDate) {
+                            if (parseInt(currentDateStr.split('-')[2]) === 1) shouldInvest = true;
                         }
                     }
-                },
-                scales: { 
-                    x: { ticks: { maxTicksLimit: 15 } },
-                    y: { beginAtZero: false }
+                    if (shouldInvest) {
+                        fundShares[fund] += amt / nav;
+                        dailyInv += amt;
+                        cashFlows.push(-amt);
+                        flowDates.push(new Date(currentDt));
+                    }
+                }
+                let mv = 0;
+                for (const code of Object.keys(fundShares)) {
+                    const fundData = fundsData[code];
+                    const idx = fundData.dates.findIndex(d => formatDate(d) === dateStr);
+                    if (idx !== -1) mv += fundShares[code] * fundData.nav[idx];
+                }
+                dailyAsset.push(mv + totalCash);
+                dailyDates.push(new Date(currentDt));
+                dailyInvest.push(dailyInv);
+            }
+
+            let marketValue = 0;
+            for (const code of Object.keys(fundShares)) {
+                const fundData = fundsData[code];
+                marketValue += fundShares[code] * fundData.nav[fundData.nav.length-1];
+            }
+            const cashDiv = totalCash;
+            const totalAsset = marketValue + cashDiv;
+            cashFlows.push(marketValue);
+            flowDates.push(dailyDates[dailyDates.length-1]);
+            const totalInvest = -cashFlows.reduce((s, v) => s + (v < 0 ? v : 0), 0);
+            const totalReturn = totalInvest > 0 ? (totalAsset / totalInvest - 1) * 100 : 0;
+            const combined = flowDates.map((d, i) => ({ date: d, cf: cashFlows[i] }));
+            combined.sort((a, b) => a.date - b.date);
+            const xirrVal = xirr(combined.map(c=>c.cf), combined.map(c=>c.date)) * 100;
+
+            const startIdx = dailyDates.findIndex(d => d >= earliestInvestDate);
+            const validDates = dailyDates.slice(startIdx);
+            const validAssets = dailyAsset.slice(startIdx);
+            const validInvest = dailyInvest.slice(startIdx);
+
+            let annualVolatility = NaN, sharpeRatio = NaN, calmarRatio = NaN, maxDrawdown = 0;
+            let netValues = [];
+            if (validDates.length >= MIN_TRADE_DAYS) {
+                netValues = [1.0];
+                for (let i = 1; i < validAssets.length; i++) {
+                    const yesterdayAsset = validAssets[i-1];
+                    const todayAsset = validAssets[i];
+                    const todayInvest = validInvest[i];
+                    if (yesterdayAsset > 0) netValues.push(netValues[i-1] * ((todayAsset - todayInvest) / yesterdayAsset));
+                    else netValues.push(1.0);
+                }
+                const dailyReturns = [];
+                for (let i = 1; i < netValues.length; i++) dailyReturns.push((netValues[i] - netValues[i-1]) / netValues[i-1]);
+                const totalDays = (validDates[validDates.length-1] - validDates[0]) / (1000*60*60*24);
+                const annualReturn = Math.pow(netValues[netValues.length-1], 365/totalDays) - 1;
+                const mean = dailyReturns.reduce((a,b)=>a+b,0)/dailyReturns.length;
+                const variance = dailyReturns.reduce((a,b)=>a+Math.pow(b-mean,2),0)/dailyReturns.length;
+                annualVolatility = Math.sqrt(variance) * Math.sqrt(252);
+                let peak = netValues[0];
+                for (const v of netValues) { if (v > peak) peak = v; const dd = (v - peak) / peak; if (dd < maxDrawdown) maxDrawdown = dd; }
+                maxDrawdown *= 100;
+                if (annualVolatility > 0) sharpeRatio = (annualReturn - RISK_FREE_RATE) / annualVolatility;
+                if (maxDrawdown !== 0) calmarRatio = annualReturn / Math.abs(maxDrawdown/100);
+            }
+            backtestResult = { dates: validDates, assets: validAssets, netValues };
+
+            let riskHtml = validDates.length >= MIN_TRADE_DAYS ? `
+                <div class="bg-red-50 p-4 rounded-lg text-center"><div class="text-sm text-gray-600">最大回撤</div><div class="text-2xl font-bold text-red-700">${maxDrawdown.toFixed(2)}%</div></div>
+                <div class="bg-orange-50 p-4 rounded-lg text-center"><div class="text-sm text-gray-600">年化波动率</div><div class="text-2xl font-bold text-orange-700">${(annualVolatility*100).toFixed(2)}%</div></div>
+                <div class="bg-teal-50 p-4 rounded-lg text-center"><div class="text-sm text-gray-600">夏普/卡玛</div><div class="text-2xl font-bold text-teal-700">${sharpeRatio.toFixed(2)}/${calmarRatio.toFixed(2)}</div></div>
+            ` : `<div class="bg-gray-100 p-4 rounded-lg text-center col-span-3"><div class="text-sm text-gray-600">风险指标</div><div class="text-xl font-medium text-gray-500">投资时间不足${MIN_TRADE_DAYS}个交易日</div></div>`;
+
+            document.getElementById('metrics').innerHTML = `
+                <div class="bg-blue-50 p-4 rounded-lg text-center"><div class="text-sm text-gray-600">总投入本金</div><div class="text-2xl font-bold text-blue-700">${totalInvest.toFixed(2)} 元</div></div>
+                <div class="bg-green-50 p-4 rounded-lg text-center"><div class="text-sm text-gray-600">持仓市值</div><div class="text-2xl font-bold text-green-700">${marketValue.toFixed(2)} 元</div></div>
+                <div class="bg-yellow-50 p-4 rounded-lg text-center"><div class="text-sm text-gray-600">累计现金分红</div><div class="text-2xl font-bold text-yellow-700">${cashDiv.toFixed(2)} 元</div></div>
+                <div class="bg-purple-50 p-4 rounded-lg text-center"><div class="text-sm text-gray-600">总资产</div><div class="text-2xl font-bold text-purple-700">${totalAsset.toFixed(2)} 元</div></div>
+                <div class="bg-indigo-50 p-4 rounded-lg text-center"><div class="text-sm text-gray-600">累计收益率</div><div class="text-2xl font-bold text-indigo-700">${totalReturn.toFixed(2)}%</div></div>
+                <div class="bg-pink-50 p-4 rounded-lg text-center"><div class="text-sm text-gray-600">XIRR年化</div><div class="text-2xl font-bold text-pink-700">${isNaN(xirrVal)?'-':xirrVal.toFixed(2)+'%'}</div></div>
+                ${riskHtml}
+            `;
+
+            if (validDates.length > 0) {
+                document.getElementById('chartFilter').style.display = 'block';
+                document.getElementById('benchmarkSelectorWrapper').style.display = 'flex';
+                const minD = formatDate(validDates[0]), maxD = formatDate(validDates[validDates.length-1]);
+                document.getElementById('chartStartDate').value = minD; document.getElementById('chartStartDate').min = minD; document.getElementById('chartStartDate').max = maxD;
+                document.getElementById('chartEndDate').value = maxD; document.getElementById('chartEndDate').min = minD; document.getElementById('chartEndDate').max = maxD;
+                document.getElementById('chartStartDate').onchange = updateCharts;
+                document.getElementById('chartEndDate').onchange = updateCharts;
+            } else {
+                document.getElementById('benchmarkSelectorWrapper').style.display = 'none';
+            }
+            updateCharts();
+        }
+
+        // 更新图表（基准对齐至组合起点）
+        async function updateCharts() {
+            const startDate = new Date(document.getElementById('chartStartDate').value);
+            const endDate = new Date(document.getElementById('chartEndDate').value);
+            const filtered = backtestResult.dates.map((d,i)=>({date:d, asset:backtestResult.assets[i], nv:backtestResult.netValues[i]}))
+                .filter(item => item.date >= startDate && item.date <= endDate);
+            const chartDates = filtered.map(d => formatDate(d.date));
+            const chartAssets = filtered.map(d => d.asset);
+            const chartNetValues = filtered.map(d => d.nv);
+
+            let benchmarkDataset = null;
+            if (currentBenchmarkId && filtered.length > 0) {
+                const benchmark = await db.benchmarks.get(currentBenchmarkId);
+                if (benchmark && benchmark.data.length > 0) {
+                    const bmMap = new Map(benchmark.data.map(d => [d.date, d.nav]));
+                    
+                    // 构建原始基准净值序列（按图表日期）
+                    const rawBenchValues = [];
+                    for (let d of filtered.map(f=>f.date)) {
+                        const dateStr = formatDate(d);
+                        const nav = bmMap.get(dateStr);
+                        rawBenchValues.push(nav !== undefined ? nav : null);
+                    }
+                    
+                    // 前向填充缺失值
+                    for (let i = 1; i < rawBenchValues.length; i++) {
+                        if (rawBenchValues[i] === null) rawBenchValues[i] = rawBenchValues[i-1];
+                    }
+                    
+                    // 找到第一个有效的基准净值及其索引
+                    let firstValidIdx = -1;
+                    let firstBenchNav = null;
+                    for (let i = 0; i < rawBenchValues.length; i++) {
+                        if (rawBenchValues[i] !== null) {
+                            firstValidIdx = i;
+                            firstBenchNav = rawBenchValues[i];
+                            break;
+                        }
+                    }
+                    
+                    if (firstValidIdx !== -1) {
+                        // 获取对应日期的组合净值
+                        const firstNetValue = chartNetValues[firstValidIdx];
+                        
+                        // 计算缩放比例（若组合净值有效）
+                        if (firstNetValue && firstBenchNav > 0) {
+                            const scale = firstNetValue / firstBenchNav;
+                            
+                            // 生成缩放后的基准序列（缺失值填 null，绘图时 Chart.js 会忽略）
+                            const scaledBenchValues = rawBenchValues.map(v => v !== null ? v * scale : null);
+                            
+                            benchmarkDataset = {
+                                label: benchmark.name + ' (已对齐)',
+                                data: scaledBenchValues,
+                                borderColor: '#f97316',
+                                backgroundColor: 'transparent',
+                                borderDash: [5,5],
+                                borderWidth: 2,
+                                pointRadius: 0,
+                                tension: 0.1,
+                                spanGaps: false  // 不连接缺失段
+                            };
+                        }
+                    }
                 }
             }
-        });
-    } else {
-        netValueCtx.clearRect(0, 0, netValueCtx.canvas.width, netValueCtx.canvas.height);
-        netValueCtx.font = '14px sans-serif';
-        netValueCtx.fillStyle = '#666';
-        netValueCtx.fillText('投资时间不足，暂不绘制净值曲线', 100, 150);
-    }
 
-    const assetCtx = document.getElementById('assetChart').getContext('2d');
-    if (assetChart) assetChart.destroy();
-    assetChart = new Chart(assetCtx, {
-        type: 'line',
-        data: {
-            labels: chartDates,
-            datasets: [{
-                label: '总资产',
-                data: validAssets,
-                borderColor: '#3b82f6',
-                backgroundColor: 'rgba(59, 130, 246, 0.1)',
+            const netCtx = document.getElementById('netValueChart').getContext('2d');
+            if (netValueChart) netValueChart.destroy();
+            const netDatasets = [{
+                label: '组合净值',
+                data: chartNetValues,
+                borderColor: '#10b981',
+                backgroundColor: 'rgba(16,185,129,0.1)',
                 fill: true,
                 tension: 0.1,
                 pointRadius: 0,
                 pointHoverRadius: 6
-            }]
-        },
-        options: {
-            responsive: true,
-            interaction: { mode: 'index', intersect: false },
-            plugins: {
-                legend: { display: false },
-                tooltip: {
-                    mode: 'index',
-                    intersect: false,
-                    callbacks: {
-                        label: (ctx) => `总资产: ${ctx.raw.toFixed(2)} 元`
-                    }
+            }];
+            if (benchmarkDataset) netDatasets.push(benchmarkDataset);
+
+            netValueChart = new Chart(netCtx, {
+                type: 'line', data: { labels: chartDates, datasets: netDatasets },
+                options: {
+                    responsive: true, interaction: { mode: 'index', intersect: false },
+                    plugins: {
+                        tooltip: { mode: 'index' },
+                        legend: { labels: { usePointStyle: true } }
+                    },
+                    scales: { x: { ticks: { maxTicksLimit: 15 } }, y: { beginAtZero: false } }
                 }
-            },
-            scales: { x: { ticks: { maxTicksLimit: 15 } } }
+            });
+
+            const assetCtx = document.getElementById('assetChart').getContext('2d');
+            if (assetChart) assetChart.destroy();
+            assetChart = new Chart(assetCtx, {
+                type: 'line', data: { labels: chartDates, datasets: [{
+                    label: '总资产', data: chartAssets, borderColor: '#3b82f6',
+                    backgroundColor: 'rgba(59,130,246,0.1)', fill: true, tension: 0.1, pointRadius: 0
+                }] },
+                options: {
+                    responsive: true, interaction: { mode: 'index' },
+                    scales: { x: { ticks: { maxTicksLimit: 15 } } }
+                }
+            });
         }
-    });
-}
-</script>
+    </script>
 </body>
 </html>
