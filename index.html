@@ -3,7 +3,7 @@
 <head>
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
-    <title>基金组合回测工具 v20260417.2330</title>
+    <title>基金组合回测工具 v20260419.1440</title>
     <!-- 依赖库 -->
     <script src="https://cdn.sheetjs.com/xlsx-0.20.1/package/dist/xlsx.full.min.js"></script>
     <script src="https://cdn.jsdelivr.net/npm/chart.js@4.4.1/dist/chart.umd.min.js"></script>
@@ -131,7 +131,7 @@
                 <h3 class="text-lg font-semibold mb-3 text-gray-700">图表日期范围筛选</h3>
                 <div class="grid grid-cols-1 md:grid-cols-2 gap-4">
                     <div>
-                        <label class="block text-sm font-medium text-gray-700 mb-1">开始日期</label>
+                        <label class="block text-sm font-medium text-gray-700 mb-1">起始日期</label>
                         <input type="date" id="chartStartDate" class="w-full p-2 border border-gray-300 rounded-lg focus:ring-2 focus:ring-blue-500">
                     </div>
                     <div>
@@ -159,6 +159,36 @@
                 <div>
                     <h3 class="text-lg font-semibold mb-2 text-gray-700">组合总资产曲线</h3>
                     <canvas id="assetChart"></canvas>
+                </div>
+                <!-- 5. 关键节点分析表格 -->
+                <div class="mt-8" id="analysisTableSection">
+                    <div class="flex items-center justify-between mb-2">
+                        <h3 class="text-lg font-semibold text-gray-700">📋 关键节点对比分析</h3>
+                        <button id="toggleAnalysisTableBtn" class="text-sm text-gray-500 hover:text-gray-700 px-2 py-1 rounded border">▲ 折叠表格</button>
+                    </div>
+                    <div id="analysisTableCollapsible">
+                        <div class="overflow-x-auto">
+                            <table class="min-w-full bg-white border border-gray-200 rounded-lg text-sm">
+                                <thead class="bg-gray-100">
+                                    <tr>
+                                        <th class="px-4 py-2 border-b text-left">节点</th>
+                                        <th class="px-4 py-2 border-b text-right">日期</th>
+                                        <th class="px-4 py-2 border-b text-right">组合净值</th>
+                                        <th class="px-4 py-2 border-b text-right">基准净值</th>
+                                        <th class="px-4 py-2 border-b text-right">组合累计收益</th>
+                                        <th class="px-4 py-2 border-b text-right">基准累计收益</th>
+                                        <th class="px-4 py-2 border-b text-right">超额收益</th>
+                                        <th class="px-4 py-2 border-b text-right">阶段收益(组合)</th>
+                                        <th class="px-4 py-2 border-b text-right">阶段收益(基准)</th>
+                                    </tr>
+                                </thead>
+                                <tbody id="analysisTableBody">
+                                    <!-- 动态填充 -->
+                                </tbody>
+                            </table>
+                        </div>
+                        <p class="text-xs text-gray-500 mt-2">* 净值已归一化至投资最早日期为1.0，基准已对齐组合起点。阶段收益为相邻节点间收益率。</p>
+                    </div>
                 </div>
             </div>
         </div>
@@ -737,6 +767,7 @@
                 document.getElementById('benchmarkSelectorWrapper').style.display = 'none';
             }
             updateCharts();
+            renderAnalysisTable(); // 确保调用的是异步函数
         }
 
         // 更新图表（基准对齐至组合起点）
@@ -855,9 +886,17 @@
                         y: {
                             beginAtZero: false,
                             position: 'left',
-                            title: { display: true, text: '净值' },
+                            title: { 
+                                display: true, 
+                                text: `净值 (起始日 ${startNetValue.toFixed(3)})` 
+                            },
                             min: minVal - padding,
-                            max: maxVal + padding
+                            max: maxVal + padding,
+                            ticks: {
+                                callback: function(value) {
+                                    return value.toFixed(3);
+                                }
+                            }
                         },
                         y1: {
                             position: 'right',
@@ -889,7 +928,168 @@
                     scales: { x: { ticks: { maxTicksLimit: 15 } } }
                 }
             });
+
+        //    renderAnalysisTable();
         }
+
+        // 渲染关键节点分析表格（修正版）
+        async function renderAnalysisTable() {
+            const validDates = backtestResult.dates;
+            const netValues = backtestResult.netValues;
+            if (validDates.length === 0 || netValues.length === 0) return;
+
+            // 1. 获取四个节点日期（从DOM实时读取）
+            const investMinDate = investmentPlans.length > 0 
+                ? new Date(Math.min(...investmentPlans.map(p => new Date(p.startDate).getTime())))
+                : null;
+            const investMaxDate = investmentPlans.length > 0 
+                ? new Date(Math.max(...investmentPlans.map(p => new Date(p.type === 'single' ? p.startDate : p.endDate).getTime())))
+                : null;
+            
+            const chartStartInput = document.getElementById('chartStartDate');
+            const chartEndInput = document.getElementById('chartEndDate');
+            const chartStartDate = chartStartInput?.value ? new Date(chartStartInput.value) : null;
+            const chartEndDate = chartEndInput?.value ? new Date(chartEndInput.value) : null;
+
+            // 2. 获取选中的基准数据
+            let benchmarkData = null;
+            if (currentBenchmarkId) {
+                const bm = await db.benchmarks.get(currentBenchmarkId);
+                benchmarkData = bm ? bm.data : null;
+            }
+
+            // 辅助函数：在 validDates 中找到 ≤ targetDate 的最大索引
+            const getIndexForDate = (targetDate) => {
+                if (!targetDate) return -1;
+                for (let i = validDates.length - 1; i >= 0; i--) {
+                    if (validDates[i] <= targetDate) return i;
+                }
+                return -1;
+            };
+
+            // 构建四个候选节点
+            const nodeCandidates = [
+                { name: '投资计划最早', date: investMinDate },
+                { name: '图表开始', date: chartStartDate },
+                { name: '图表结束', date: chartEndDate },
+                { name: '投资计划最晚', date: investMaxDate }
+            ].filter(n => n.date !== null);
+
+            // 为每个节点找到对应索引
+            const nodesWithIdx = nodeCandidates.map(node => ({
+                ...node,
+                idx: getIndexForDate(node.date)
+            })).filter(node => node.idx !== -1);
+
+            // 去重：相同日期只保留第一个出现的节点（合并名称）
+            const uniqueNodes = [];
+            const seenDates = new Set();
+            for (const node of nodesWithIdx) {
+                const dateKey = formatDate(validDates[node.idx]);
+                if (!seenDates.has(dateKey)) {
+                    seenDates.add(dateKey);
+                    uniqueNodes.push({ ...node, dateKey });
+                }
+            }
+
+            if (uniqueNodes.length === 0) return;
+
+            // 3. 计算基准归一化参数（与 updateCharts 逻辑一致）
+            let firstBenchNav = null;
+            let bmMap = null;
+            if (benchmarkData) {
+                bmMap = new Map(benchmarkData.map(d => [d.date, d.nav]));
+                // 找到图表数据范围内第一个有效的基准净值
+                for (let d of validDates) {
+                    const nav = bmMap.get(formatDate(d));
+                    if (nav !== undefined) {
+                        firstBenchNav = nav;
+                        break;
+                    }
+                }
+            }
+
+            // 投资最早日期的组合净值作为累计收益基准
+            const baseIdx = uniqueNodes[0].idx;
+            const baseComboNav = netValues[baseIdx];
+
+            // 计算基准在 baseIdx 处的对齐净值
+            let baseBenchNav = null;
+            if (bmMap && firstBenchNav) {
+                const scale = baseComboNav / firstBenchNav;
+                const rawNav = bmMap.get(formatDate(validDates[baseIdx]));
+                baseBenchNav = rawNav ? rawNav * scale : null;
+            }
+
+            // 4. 逐行计算数据
+            const rows = [];
+            for (let i = 0; i < uniqueNodes.length; i++) {
+                const node = uniqueNodes[i];
+                const idx = node.idx;
+                const dateStr = formatDate(validDates[idx]);
+                const comboNav = netValues[idx];
+
+                // 基准净值（对齐后）
+                let benchNav = null;
+                if (bmMap && firstBenchNav) {
+                    const scale = baseComboNav / firstBenchNav;
+                    const rawNav = bmMap.get(dateStr);
+                    benchNav = rawNav ? rawNav * scale : null;
+                }
+
+                // 累计收益（相对于投资最早日期）
+                const comboAccReturn = baseComboNav > 0 ? (comboNav / baseComboNav - 1) * 100 : 0;
+                const benchAccReturn = (benchNav !== null && baseBenchNav !== null && baseBenchNav > 0) 
+                    ? (benchNav / baseBenchNav - 1) * 100 : null;
+                const excessReturn = benchAccReturn !== null ? comboAccReturn - benchAccReturn : null;
+
+                // 阶段收益（相对于上一节点）
+                let stageCombo = null, stageBench = null;
+                if (i > 0) {
+                    const prevNode = uniqueNodes[i-1];
+                    const prevIdx = prevNode.idx;
+                    const prevCombo = netValues[prevIdx];
+                    stageCombo = prevCombo > 0 ? (comboNav / prevCombo - 1) * 100 : null;
+
+                    if (benchmarkData && benchNav !== null) {
+                        const prevRawNav = bmMap.get(formatDate(validDates[prevIdx]));
+                        const prevBenchNav = prevRawNav ? prevRawNav * (baseComboNav / firstBenchNav) : null;
+                        stageBench = (prevBenchNav && prevBenchNav > 0) ? (benchNav / prevBenchNav - 1) * 100 : null;
+                    }
+                }
+
+                rows.push({
+                    name: node.name,
+                    date: dateStr,
+                    comboNav: comboNav.toFixed(4),
+                    benchNav: benchNav !== null ? benchNav.toFixed(4) : '-',
+                    comboAcc: comboAccReturn.toFixed(2) + '%',
+                    benchAcc: benchAccReturn !== null ? benchAccReturn.toFixed(2) + '%' : '-',
+                    excess: excessReturn !== null ? excessReturn.toFixed(2) + '%' : '-',
+                    stageCombo: stageCombo !== null ? stageCombo.toFixed(2) + '%' : '-',
+                    stageBench: stageBench !== null ? stageBench.toFixed(2) + '%' : '-'
+                });
+            }
+
+            // 5. 渲染表格
+            const tbody = document.getElementById('analysisTableBody');
+            if (!tbody) return;
+            
+            tbody.innerHTML = rows.map(r => `
+                <tr class="hover:bg-gray-50">
+                    <td class="px-4 py-2 border-b font-medium">${r.name}</td>
+                    <td class="px-4 py-2 border-b text-right font-mono">${r.date}</td>
+                    <td class="px-4 py-2 border-b text-right">${r.comboNav}</td>
+                    <td class="px-4 py-2 border-b text-right">${r.benchNav}</td>
+                    <td class="px-4 py-2 border-b text-right ${parseFloat(r.comboAcc) >= 0 ? 'text-green-600' : 'text-red-600'}">${r.comboAcc}</td>
+                    <td class="px-4 py-2 border-b text-right ${r.benchAcc !== '-' && parseFloat(r.benchAcc) >= 0 ? 'text-green-600' : 'text-red-600'}">${r.benchAcc}</td>
+                    <td class="px-4 py-2 border-b text-right ${r.excess !== '-' && parseFloat(r.excess) >= 0 ? 'text-green-600' : 'text-red-600'}">${r.excess}</td>
+                    <td class="px-4 py-2 border-b text-right ${r.stageCombo !== '-' && parseFloat(r.stageCombo) >= 0 ? 'text-green-600' : 'text-red-600'}">${r.stageCombo}</td>
+                    <td class="px-4 py-2 border-b text-right ${r.stageBench !== '-' && parseFloat(r.stageBench) >= 0 ? 'text-green-600' : 'text-red-600'}">${r.stageBench}</td>
+                </tr>
+            `).join('');
+        }
+
     </script>
 </body>
 </html>
