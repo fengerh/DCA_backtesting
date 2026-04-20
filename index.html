@@ -3,7 +3,7 @@
 <head>
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
-    <title>基金组合回测工具 v20260419.1440</title>
+    <title>基金组合回测工具 v20260420.1330</title>
     <!-- 依赖库 -->
     <script src="https://cdn.sheetjs.com/xlsx-0.20.1/package/dist/xlsx.full.min.js"></script>
     <script src="https://cdn.jsdelivr.net/npm/chart.js@4.4.1/dist/chart.umd.min.js"></script>
@@ -18,7 +18,7 @@
         <div class="bg-white p-6 rounded-xl shadow-md mb-6">
             <h2 class="text-xl font-semibold mb-4 text-gray-700 flex items-center gap-2">
                 📁 数据管理
-                <span class="text-sm font-normal text-gray-500 ml-2">(上传基金 / 指数 Excel，每个Sheet为一个基金 / 指数)</span>
+                <span class="text-sm font-normal text-gray-500 ml-2">(上传基金/指数Excel，每个Sheet为一个基金/指数)</span>
             </h2>
             <div class="grid grid-cols-1 md:grid-cols-2 gap-6">
                 <!-- 左侧：基金数据上传 -->
@@ -171,15 +171,15 @@
                             <table class="min-w-full bg-white border border-gray-200 rounded-lg text-sm">
                                 <thead class="bg-gray-100">
                                     <tr>
-                                        <th class="px-4 py-2 border-b text-left">节点</th>
-                                        <th class="px-4 py-2 border-b text-right">日期</th>
-                                        <th class="px-4 py-2 border-b text-right">组合净值</th>
-                                        <th class="px-4 py-2 border-b text-right">基准净值</th>
-                                        <th class="px-4 py-2 border-b text-right">组合累计收益</th>
-                                        <th class="px-4 py-2 border-b text-right">基准累计收益</th>
-                                        <th class="px-4 py-2 border-b text-right">超额收益</th>
-                                        <th class="px-4 py-2 border-b text-right">阶段收益(组合)</th>
-                                        <th class="px-4 py-2 border-b text-right">阶段收益(基准)</th>
+                                        <th class="px-4 py-2 border-b text-center">节点</th>
+                                        <th class="px-4 py-2 border-b text-center">日期</th>
+                                        <th class="px-4 py-2 border-b text-center">组合净值</th>
+                                        <th class="px-4 py-2 border-b text-center">基准净值</th>
+                                        <th class="px-4 py-2 border-b text-center">组合累计收益</th>
+                                        <th class="px-4 py-2 border-b text-center">基准累计收益</th>
+                                        <th class="px-4 py-2 border-b text-center">超额收益</th>
+                                        <th class="px-4 py-2 border-b text-center">阶段收益(组合)</th>
+                                        <th class="px-4 py-2 border-b text-center">阶段收益(基准)</th>
                                     </tr>
                                 </thead>
                                 <tbody id="analysisTableBody">
@@ -301,7 +301,7 @@
             select.onchange = () => {
                 currentBenchmarkId = select.value ? parseInt(select.value) : null;
                 document.querySelectorAll('.benchmark-radio').forEach(r => r.checked = r.value == select.value);
-                if (backtestResult.dates.length) updateCharts();
+                if (backtestResult.dates.length) updateCharts(); // 这会触发图表和表格的更新
             };
         }
 
@@ -929,7 +929,7 @@
                 }
             });
 
-        //    renderAnalysisTable();
+            renderAnalysisTable();
         }
 
         // 渲染关键节点分析表格（修正版）
@@ -1077,15 +1077,15 @@
             
             tbody.innerHTML = rows.map(r => `
                 <tr class="hover:bg-gray-50">
-                    <td class="px-4 py-2 border-b font-medium">${r.name}</td>
-                    <td class="px-4 py-2 border-b text-right font-mono">${r.date}</td>
-                    <td class="px-4 py-2 border-b text-right">${r.comboNav}</td>
-                    <td class="px-4 py-2 border-b text-right">${r.benchNav}</td>
-                    <td class="px-4 py-2 border-b text-right ${parseFloat(r.comboAcc) >= 0 ? 'text-green-600' : 'text-red-600'}">${r.comboAcc}</td>
-                    <td class="px-4 py-2 border-b text-right ${r.benchAcc !== '-' && parseFloat(r.benchAcc) >= 0 ? 'text-green-600' : 'text-red-600'}">${r.benchAcc}</td>
-                    <td class="px-4 py-2 border-b text-right ${r.excess !== '-' && parseFloat(r.excess) >= 0 ? 'text-green-600' : 'text-red-600'}">${r.excess}</td>
-                    <td class="px-4 py-2 border-b text-right ${r.stageCombo !== '-' && parseFloat(r.stageCombo) >= 0 ? 'text-green-600' : 'text-red-600'}">${r.stageCombo}</td>
-                    <td class="px-4 py-2 border-b text-right ${r.stageBench !== '-' && parseFloat(r.stageBench) >= 0 ? 'text-green-600' : 'text-red-600'}">${r.stageBench}</td>
+                    <td class="px-4 py-2 border-b text-center font-medium">${r.name}</td>
+                    <td class="px-4 py-2 border-b text-center font-mono">${r.date}</td>
+                    <td class="px-4 py-2 border-b text-center">${r.comboNav}</td>
+                    <td class="px-4 py-2 border-b text-center">${r.benchNav}</td>
+                    <td class="px-4 py-2 border-b text-center ${parseFloat(r.comboAcc) >= 0 ? 'text-green-600' : 'text-red-600'}">${r.comboAcc}</td>
+                    <td class="px-4 py-2 border-b text-center ${r.benchAcc !== '-' && parseFloat(r.benchAcc) >= 0 ? 'text-green-600' : 'text-red-600'}">${r.benchAcc}</td>
+                    <td class="px-4 py-2 border-b text-center ${r.excess !== '-' && parseFloat(r.excess) >= 0 ? 'text-green-600' : 'text-red-600'}">${r.excess}</td>
+                    <td class="px-4 py-2 border-b text-center ${r.stageCombo !== '-' && parseFloat(r.stageCombo) >= 0 ? 'text-green-600' : 'text-red-600'}">${r.stageCombo}</td>
+                    <td class="px-4 py-2 border-b text-center ${r.stageBench !== '-' && parseFloat(r.stageBench) >= 0 ? 'text-green-600' : 'text-red-600'}">${r.stageBench}</td>
                 </tr>
             `).join('');
         }
