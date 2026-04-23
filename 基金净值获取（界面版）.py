@@ -168,6 +168,52 @@ def update_dividend_cache(years_needed, log_callback, force_refresh=False):
     return cache
 
 
+def get_fund_name_akshare(fund_code):
+    """获取基金名称 - 修复版本"""
+    try:
+        # 方法1: 使用 fund_name_em 接口获取基金基本信息
+        try:
+            # 先尝试用东方财富的接口
+            fund_info = ak.fund_name_em()
+            if not fund_info.empty:
+                # 查找匹配的基金
+                match = fund_info[fund_info['基金代码'] == fund_code]
+                if not match.empty and '基金简称' in match.columns:
+                    return match['基金简称'].iloc[0]
+        except Exception as e1:
+            print(f"方法1获取基金 {fund_code} 名称失败: {e1}")
+        
+        # 方法2: 使用 fund_info_em 接口
+        try:
+            fund_info_df = ak.fund_info_em(symbol=fund_code)
+            if not fund_info_df.empty:
+                # 查看有哪些列可用
+                print(f"基金 {fund_code} 可用列: {fund_info_df.columns.tolist()}")
+                
+                # 尝试不同的可能列名
+                possible_columns = ['基金简称', '基金名称', 'name', 'SHORTNAME', 'fund_name']
+                for col in possible_columns:
+                    if col in fund_info_df.columns and not pd.isna(fund_info_df[col].iloc[0]):
+                        return str(fund_info_df[col].iloc[0])
+        except Exception as e2:
+            print(f"方法2获取基金 {fund_code} 名称失败: {e2}")
+        
+        # 方法3: 使用 fund_individual_info_em
+        try:
+            fund_individual = ak.fund_individual_info_em(symbol=fund_code, indicator="单位净值走势")
+            if not fund_individual.empty and '基金名称' in fund_individual.columns:
+                return fund_individual['基金名称'].iloc[0]
+        except Exception as e3:
+            print(f"方法3获取基金 {fund_code} 名称失败: {e3}")
+        
+        # 如果所有方法都失败，使用更智能的默认名称
+        return f"基金_{fund_code}"
+        
+    except Exception as e:
+        print(f"获取基金 {fund_code} 名称时发生错误: {e}")
+        return f"基金_{fund_code}"
+    
+
 def create_excel(fund_list, start_date, end_date, output_file, log_callback, force_refresh=False):
     placeholder = pd.DataFrame(columns=['日期', '单位净值(元)', '每份分红(元)'])
     
@@ -185,18 +231,23 @@ def create_excel(fund_list, start_date, end_date, output_file, log_callback, for
         for i, code in enumerate(fund_list):
             log_callback(f"正在处理 {code} ...")
             try:
-                df = get_fund_data_akshare(code, start_date, end_date, dividend_cache)
-                ws_name = code
-                if df.empty:
-                    placeholder.to_excel(writer, sheet_name=ws_name, index=False)
-                    worksheet = writer.sheets[ws_name]
-                    log_callback(f"  ⚠ {code} 无数据，已写入空表")
-                else:
-                    df.to_excel(writer, sheet_name=ws_name, index=False)
-                    worksheet = writer.sheets[ws_name]
-                    log_callback(f"  ✅ {code} 完成，共 {len(df)} 条记录")
+                # 获取基金名称
+                fund_name = get_fund_name_akshare(code)
+                # 创建Sheet名，格式为：基金代码_基金名称
+                sheet_name = f"{code}_{fund_name}"
+                # 清理Sheet名中的非法字符（Excel不允许的字符）
+                sheet_name = clean_sheet_name(sheet_name)
                 
-                # 自适应列宽（保持不变）
+                df = get_fund_data_akshare(code, start_date, end_date, dividend_cache)
+                if df.empty:
+                    placeholder.to_excel(writer, sheet_name=sheet_name, index=False)
+                    log_callback(f"  ⚠ {code} 无数据，已写入空表 (Sheet: {sheet_name})")
+                else:
+                    df.to_excel(writer, sheet_name=sheet_name, index=False)
+                    log_callback(f"  ✅ {code} 完成，共 {len(df)} 条记录 (Sheet: {sheet_name})")
+                
+                # 自适应列宽
+                worksheet = writer.sheets[sheet_name]
                 for column in worksheet.columns:
                     max_length = 0
                     column_letter = column[0].column_letter
@@ -213,17 +264,38 @@ def create_excel(fund_list, start_date, end_date, output_file, log_callback, for
                     worksheet.column_dimensions[column_letter].width = adjusted_width
 
             except Exception as e:
-                placeholder.to_excel(writer, sheet_name=code, index=False)
-                log_callback(f"  ❌ {code} 失败: {e}")
+                # 如果创建有名称的Sheet失败，尝试使用纯代码作为Sheet名
+                sheet_name = code
+                placeholder.to_excel(writer, sheet_name=sheet_name, index=False)
+                log_callback(f"  ❌ {code} 失败: {e}，已用纯代码作为Sheet名")
             time.sleep(0.5)
     log_callback(f"\n🎉 全部完成！文件已保存为：{output_file}")
+
+
+def clean_sheet_name(name, max_length=31):
+    """
+    清理Sheet名中的非法字符
+    Excel Sheet名限制：不能超过31个字符，不能包含: \ / ? * [ ]
+    """
+    # 定义非法字符
+    invalid_chars = ['\\', '/', '?', '*', '[', ']', ':', '：']
+    
+    # 移除非法字符
+    for char in invalid_chars:
+        name = name.replace(char, '')
+    
+    # 截断到最大长度
+    if len(name) > max_length:
+        name = name[:max_length-3] + "..."  # 保留3个字符给省略号
+    
+    return name
 
 
 # ---------- GUI 界面 ----------
 class FundApp:
     def __init__(self, root):
         self.root = root
-        root.title("基金数据批量获取工具 v20260409.1400")
+        root.title("基金数据批量获取工具 v20260423.1330")
         root.geometry("550x550")
         root.resizable(True, True)
 
