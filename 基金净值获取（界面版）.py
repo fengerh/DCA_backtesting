@@ -12,17 +12,16 @@ import os
 # ---------- 核心获取函数（已按年优化分红逻辑） ----------
 def get_fund_data_akshare(fund_code, start_date, end_date, dividend_cache):
     """
-    使用正确的 akshare 接口获取基金的净值和分红数据。
-    dividend_cache: 一个字典，键为年份，值为该年所有基金的分红 DataFrame
+    使用缓存数据获取基金的净值和分红数据
     """
-    # --- 1. 获取净值数据 ---
+    # --- 1. 获取净值数据（保持不变）---
     try:
         nv_df = ak.fund_open_fund_info_em(symbol=fund_code, indicator="单位净值走势")
         
         if nv_df is None or nv_df.empty:
             return pd.DataFrame()
         
-        # 智能重命名：探测可能的列名
+        # 智能重命名
         if '净值日期' in nv_df.columns:
             nv_df.rename(columns={'净值日期': '日期'}, inplace=True)
         elif '日期' not in nv_df.columns:
@@ -45,20 +44,19 @@ def get_fund_data_akshare(fund_code, start_date, end_date, dividend_cache):
     except Exception as e:
         return pd.DataFrame()
 
-    # --- 2. 从缓存中获取分红数据（新逻辑）---
+    # --- 2. 从缓存中获取分红数据 ---
     try:
-        # 收集所有年份的分红数据
+        # 收集所有需要的分红数据
         all_div_dfs = []
-        years = set()
-        # 提取出所有分红的年份
-        for date_str in nv_df['日期'].dt.strftime('%Y-%m-%d'):
-            year = date_str[:4]
-            years.add(year)
         
-        # 从缓存中获取对应年份的数据
-        for year in years:
-            if year in dividend_cache:
-                year_div_df = dividend_cache[year]
+        # 从缓存中按年份查找
+        nv_df['year'] = nv_df['日期'].dt.year
+        years_needed = nv_df['year'].unique()
+        
+        for year in years_needed:
+            year_str = str(year)
+            if year_str in dividend_cache and not dividend_cache[year_str].empty:
+                year_div_df = dividend_cache[year_str]
                 # 筛选出当前基金的分红记录
                 fund_div = year_div_df[year_div_df['基金代码'] == fund_code].copy()
                 if not fund_div.empty:
@@ -66,10 +64,12 @@ def get_fund_data_akshare(fund_code, start_date, end_date, dividend_cache):
         
         if all_div_dfs:
             div_df = pd.concat(all_div_dfs, ignore_index=True)
-            # 重命名列以匹配后续处理
+            # 重命名列
             div_df.rename(columns={'除息日期': '日期', '分红': '每份分红(元)'}, inplace=True)
             div_df['日期'] = pd.to_datetime(div_df['日期'], errors='coerce')
             div_df = div_df.dropna(subset=['日期', '每份分红(元)'])
+            
+            # 筛选日期范围
             mask = (div_df['日期'] >= pd.to_datetime(start_date)) & (div_df['日期'] <= pd.to_datetime(end_date))
             div_df = div_df.loc[mask].copy()
             div_df['每份分红(元)'] = pd.to_numeric(div_df['每份分红(元)'], errors='coerce')
@@ -93,79 +93,212 @@ def get_fund_data_akshare(fund_code, start_date, end_date, dividend_cache):
     final_df['日期'] = final_df['日期'].dt.strftime('%Y-%m-%d')
     return final_df
 
+
 CACHE_FILE = "dividend_cache.pkl"
 
 def load_dividend_cache():
-    """加载本地分红缓存"""
+    """加载本地分红缓存（兼容新旧格式）"""
     if os.path.exists(CACHE_FILE):
         try:
             with open(CACHE_FILE, 'rb') as f:
-                return pickle.load(f)
+                cache = pickle.load(f)
+                # 判断是否是旧格式（简单字典）
+                if isinstance(cache, dict) and 'last_updated' not in cache:
+                    # 旧版缓存（纯按年份字典），转换为新版格式
+                    new_cache = {
+                        'last_updated': None,  # 旧缓存不知道最后更新时间
+                        'data': cache
+                    }
+                    return new_cache
+                return cache
         except:
-            return {}
-    return {}
+            return {'last_updated': None, 'data': {}}
+    return {'last_updated': None, 'data': {}}
 
 def save_dividend_cache(cache):
-    """保存分红缓存到本地"""
-    with open(CACHE_FILE, 'wb') as f:
-        pickle.dump(cache, f)
+    """保存分红缓存到本地文件"""
+    try:
+        with open(CACHE_FILE, 'wb') as f:
+            pickle.dump(cache, f)
+    except Exception as e:
+        print(f"保存分红缓存失败: {e}")
 
-
+def get_months_between(start_date, end_date):
+    """获取两个日期之间的所有月份（格式：YYYY-MM）"""
+    months = []
+    current = datetime(start_date.year, start_date.month, 1)
+    end = datetime(end_date.year, end_date.month, 1)
+    
+    while current <= end:
+        months.append(current.strftime("%Y-%m"))
+        # 下一个月
+        if current.month == 12:
+            current = datetime(current.year + 1, 1, 1)
+        else:
+            current = datetime(current.year, current.month + 1, 1)
+    
+    return months
 
 def update_dividend_cache(years_needed, log_callback, force_refresh=False):
     """
-    确保缓存中包含所需年份的分红数据。
-    返回完整的缓存字典。
+    以缓存为基础，只获取缺失的数据
     """
+    # 加载缓存
     if force_refresh:
-        cache = {}
-        log_callback("🔄 强制刷新模式：将重新获取所有年份的分红数据。")
+        cache = {'last_updated': None, 'data': {}}
+        log_callback("🔄 强制刷新模式：将重新获取所有数据。")
     else:
         cache = load_dividend_cache()
-        if cache:
-            cached_years = sorted([int(y) for y in cache.keys() if cache[y] is not None and not cache[y].empty])
-            log_callback(f"📂 已加载本地分红缓存，包含年份：{cached_years}")
-        else:
-            log_callback("📂 本地暂无分红缓存文件。")
-
-    current_year = datetime.now().year
-    existing_years = []
-    missing_years = []
-
-    for y in years_needed:
-        y_str = str(y)
-        if y == current_year:
-            # 当前年份总是重新获取，确保最新
-            missing_years.append(y)
-        elif y_str in cache and cache[y_str] is not None and not cache[y_str].empty:
-            existing_years.append(y)
-        else:
-            missing_years.append(y)
-
-    if existing_years:
-        log_callback(f"✅ 以下年份数据已在缓存中，无需下载：{existing_years}")
+        
+        # 兼容旧版缓存格式
+        if isinstance(cache, dict) and 'last_updated' not in cache:
+            # 旧版缓存（纯按年份字典），转换为新版格式
+            cache = {
+                'last_updated': None,  # 旧缓存不知道最后更新时间
+                'data': cache
+            }
+            log_callback("🔄 检测到旧版缓存格式，已自动转换。")
     
-    if missing_years:
-        log_callback(f"🌐 需要联网获取以下年份的分红数据：{missing_years}")
-        for year in missing_years:
-            try:
-                if year == current_year:
-                    log_callback(f"  🔄 当前年份 {year}，联网获取最新数据...")
-                else:
-                    log_callback(f"  ⏳ 正在获取 {year} 年的分红数据...")
-                year_div_df = ak.fund_fh_em(year=str(year))
-                cache[str(year)] = year_div_df
-                log_callback(f"  ✅ {year} 年分红数据获取成功，共 {len(year_div_df)} 条记录。")
-                time.sleep(1)
-            except Exception as e:
-                log_callback(f"  ❌ 获取 {year} 年分红数据失败: {e}")
-                cache[str(year)] = pd.DataFrame()  # 占位，避免反复尝试
+    # 获取当前时间
+    now = datetime.now()
+    
+    # 如果缓存为空，全量获取所需年份的数据
+    if not cache['data']:
+        log_callback("📂 缓存为空，开始全量获取所需年份数据...")
+        cache = fetch_full_years_data(years_needed, log_callback, cache)
+        cache['last_updated'] = now.strftime("%Y-%m-%d %H:%M:%S")
         save_dividend_cache(cache)
-        log_callback("💾 分红缓存已更新并保存到本地。")
+        return cache['data']
+    
+    # 分析缓存中已有的数据
+    log_callback("📊 分析缓存数据...")
+    
+    # 找出缓存中最晚的日期
+    latest_date_in_cache = None
+    for year, year_data in cache['data'].items():
+        if not year_data.empty and '除息日期' in year_data.columns:
+            year_data['date_dt'] = pd.to_datetime(year_data['除息日期'], errors='coerce')
+            max_date = year_data['date_dt'].max()
+            if pd.notna(max_date) and (latest_date_in_cache is None or max_date > latest_date_in_cache):
+                latest_date_in_cache = max_date
+    
+    if latest_date_in_cache is None:
+        log_callback("⚠ 缓存中没有有效日期，重新获取数据...")
+        cache = fetch_full_years_data(years_needed, log_callback, cache)
     else:
-        log_callback("🎉 所有所需年份数据均已存在，无需联网。")
+        # 计算需要补充的月份
+        log_callback(f"📅 缓存中最晚的日期: {latest_date_in_cache.strftime('%Y-%m-%d')}")
+        
+        # 如果缓存中最晚日期早于当前日期，需要更新
+        if latest_date_in_cache.date() < now.date():
+            # 计算需要获取的月份范围
+            # 从缓存最晚日期的下一个月开始
+            if latest_date_in_cache.month == 12:
+                start_year = latest_date_in_cache.year + 1
+                start_month = 1
+            else:
+                start_year = latest_date_in_cache.year
+                start_month = latest_date_in_cache.month + 1
+            
+            start_date = datetime(start_year, start_month, 1)
+            
+            # 只获取到上个月的数据（避免获取不完整的当月数据）
+            if now.month == 1:
+                end_year = now.year - 1
+                end_month = 12
+            else:
+                end_year = now.year
+                end_month = now.month - 1
+            
+            end_date = datetime(end_year, end_month, 1)
+            
+            if start_date <= end_date:
+                log_callback(f"🔄 需要补充从 {start_date.strftime('%Y-%m')} 到 {end_date.strftime('%Y-%m')} 的数据")
+                
+                # 获取缺失月份的数据
+                months_to_fetch = get_months_between(start_date, end_date)
+                
+                if months_to_fetch:
+                    log_callback(f"📥 将获取以下月份的数据: {', '.join(months_to_fetch)}")
+                    
+                    # 逐月获取数据
+                    new_data_by_year = {}
+                    for year_month in months_to_fetch:
+                        year = int(year_month.split('-')[0])
+                        
+                        try:
+                            # 获取该年数据（如果还没获取过）
+                            if str(year) not in new_data_by_year:
+                                log_callback(f"  ⏳ 获取 {year} 年分红数据...")
+                                year_data = ak.fund_fh_em(year=str(year))
+                                if not year_data.empty:
+                                    new_data_by_year[str(year)] = year_data
+                                    log_callback(f"  ✅ 获取 {year} 年数据成功，共 {len(year_data)} 条")
+                                time.sleep(0.5)
+                        except Exception as e:
+                            log_callback(f"  ❌ 获取 {year} 年数据失败: {e}")
+                    
+                    # 合并新数据到缓存
+                    for year, new_year_data in new_data_by_year.items():
+                        if year in cache['data']:
+                            # 合并并去重
+                            existing_data = cache['data'][year]
+                            combined = pd.concat([existing_data, new_year_data], ignore_index=True)
+                            
+                            # 去重（基于基金代码和除息日期）
+                            if not combined.empty and '基金代码' in combined.columns and '除息日期' in combined.columns:
+                                combined = combined.drop_duplicates(subset=['基金代码', '除息日期'])
+                            cache['data'][year] = combined
+                        else:
+                            cache['data'][year] = new_year_data
+                    
+                    # 更新最后更新时间
+                    cache['last_updated'] = now.strftime("%Y-%m-%d %H:%M:%S")
+                    save_dividend_cache(cache)
+                    log_callback(f"💾 缓存已更新，补充了 {len(months_to_fetch)} 个月的数据")
+                else:
+                    log_callback("✅ 缓存已是最新，无需更新")
+            else:
+                log_callback("✅ 缓存已是最新，无需更新")
+        else:
+            log_callback("✅ 缓存已是最新（包含最新数据），无需更新")
+    
+    return cache['data']
+
+def fetch_full_years_data(years_needed, log_callback, cache=None):
+    """获取完整年份的数据"""
+    if cache is None:
+        cache = {'last_updated': None, 'data': {}}
+    
+    for year in years_needed:
+        try:
+            log_callback(f"  ⏳ 获取 {year} 年分红数据...")
+            year_data = ak.fund_fh_em(year=str(year))
+            if not year_data.empty:
+                cache['data'][str(year)] = year_data
+                log_callback(f"  ✅ {year} 年获取成功，共 {len(year_data)} 条")
+            time.sleep(0.5)
+        except Exception as e:
+            log_callback(f"  ❌ {year} 年获取失败: {e}")
     
     return cache
+
+
+def get_months_between(start_date, end_date):
+    """获取两个日期之间的所有月份（格式：YYYY-MM）"""
+    months = []
+    current = datetime(start_date.year, start_date.month, 1)
+    end = datetime(end_date.year, end_date.month, 1)
+    
+    while current <= end:
+        months.append(current.strftime("%Y-%m"))
+        # 下一个月
+        if current.month == 12:
+            current = datetime(current.year + 1, 1, 1)
+        else:
+            current = datetime(current.year, current.month + 1, 1)
+    
+    return months
 
 
 def get_fund_name_akshare(fund_code):
@@ -217,34 +350,49 @@ def get_fund_name_akshare(fund_code):
 def create_excel(fund_list, start_date, end_date, output_file, log_callback, force_refresh=False):
     placeholder = pd.DataFrame(columns=['日期', '单位净值(元)', '每份分红(元)'])
     
-    # 计算所需年份
+    # 计算所需年份范围
     start_year = int(start_date[:4])
     end_year = int(end_date[:4])
     years_needed = list(range(start_year, end_year + 1))
     
     # 获取/更新分红缓存
     log_callback("📋 正在准备分红数据缓存...")
+    log_callback(f"📅 所需年份范围: {start_year} 到 {end_year}")
+    
+    # 智能更新缓存
     dividend_cache = update_dividend_cache(years_needed, log_callback, force_refresh)
+    
+    # 统计缓存数据量
+    total_records = 0
+    for year, data in dividend_cache.items():
+        if data is not None and not data.empty:
+            total_records += len(data)
+    
+    log_callback(f"📊 缓存总计: {len(dividend_cache)} 个年份，{total_records} 条分红记录")
     log_callback("")
     
+    # 获取基金数据并写入Excel
     with pd.ExcelWriter(output_file, engine='openpyxl') as writer:
         for i, code in enumerate(fund_list):
             log_callback(f"正在处理 {code} ...")
+            
+            # 获取基金名称
             try:
-                # 获取基金名称
                 fund_name = get_fund_name_akshare(code)
-                # 创建Sheet名，格式为：基金代码_基金名称
                 sheet_name = f"{code}_{fund_name}"
-                # 清理Sheet名中的非法字符（Excel不允许的字符）
                 sheet_name = clean_sheet_name(sheet_name)
-                
+            except:
+                sheet_name = code
+            
+            try:
                 df = get_fund_data_akshare(code, start_date, end_date, dividend_cache)
+                
                 if df.empty:
                     placeholder.to_excel(writer, sheet_name=sheet_name, index=False)
-                    log_callback(f"  ⚠ {code} 无数据，已写入空表 (Sheet: {sheet_name})")
+                    log_callback(f"  ⚠ 无数据，已写入空表")
                 else:
                     df.to_excel(writer, sheet_name=sheet_name, index=False)
-                    log_callback(f"  ✅ {code} 完成，共 {len(df)} 条记录 (Sheet: {sheet_name})")
+                    log_callback(f"  ✅ 完成，共 {len(df)} 条记录")
                 
                 # 自适应列宽
                 worksheet = writer.sheets[sheet_name]
@@ -264,11 +412,10 @@ def create_excel(fund_list, start_date, end_date, output_file, log_callback, for
                     worksheet.column_dimensions[column_letter].width = adjusted_width
 
             except Exception as e:
-                # 如果创建有名称的Sheet失败，尝试使用纯代码作为Sheet名
-                sheet_name = code
                 placeholder.to_excel(writer, sheet_name=sheet_name, index=False)
-                log_callback(f"  ❌ {code} 失败: {e}，已用纯代码作为Sheet名")
+                log_callback(f"  ❌ 失败: {e}")
             time.sleep(0.5)
+    
     log_callback(f"\n🎉 全部完成！文件已保存为：{output_file}")
 
 
@@ -295,7 +442,7 @@ def clean_sheet_name(name, max_length=31):
 class FundApp:
     def __init__(self, root):
         self.root = root
-        root.title("基金数据批量获取工具 v20260423.1330")
+        root.title("基金数据批量获取工具 v20260423.1500")
         root.geometry("550x550")
         root.resizable(True, True)
 
@@ -303,7 +450,7 @@ class FundApp:
         tk.Label(root, text="基金代码（每行一个）", font=('微软雅黑', 10)).pack(pady=(15, 5))
         self.code_text = tk.Text(root, height=6, width=50, font=('Consolas', 10))
         self.code_text.pack()
-        self.code_text.insert('1.0', "161725\n005918\n002621")
+        self.code_text.insert('1.0', "000001") # 示例代码
 
         # 日期范围（使用 DateEntry 控件）
         date_frame = tk.Frame(root)
