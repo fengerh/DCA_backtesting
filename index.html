@@ -3,7 +3,7 @@
 <head>
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
-    <title>基金组合回测工具 v20260420.1330</title>
+    <title>基金组合回测工具 v20260423.1040</title>
     <!-- 依赖库 -->
     <script src="https://cdn.sheetjs.com/xlsx-0.20.1/package/dist/xlsx.full.min.js"></script>
     <script src="https://cdn.jsdelivr.net/npm/chart.js@4.4.1/dist/chart.umd.min.js"></script>
@@ -404,7 +404,18 @@
                 return;
             }
             
-            const name = '合成_' + selectedBenchmarks.map(b => b.name).join('+');
+            // 构建带有权重的名称
+            const nameParts = [];
+            for (const bm of selectedBenchmarks) {
+                const weight = compositeWeights[bm.id];
+                if (weight > 0) {
+                    // 将权重格式化为整数（如果为整数）或保留一位小数
+                    const formattedWeight = Number.isInteger(weight) ? weight.toFixed(0) : weight.toFixed(1);
+                    nameParts.push(`${bm.name} ${formattedWeight}%`);
+                }
+            }
+            const name = '合成_' + nameParts.join('+');
+
             await db.benchmarks.add({ name, data: compositeData });
             compositeWeights = {};
             document.getElementById('compositePanel').classList.add('hidden');
@@ -932,24 +943,26 @@
             renderAnalysisTable();
         }
 
-        // 渲染关键节点分析表格（修正版）
+        // 渲染关键节点分析表格（修正版：四个固定节点）
         async function renderAnalysisTable() {
             const validDates = backtestResult.dates;
             const netValues = backtestResult.netValues;
             if (validDates.length === 0 || netValues.length === 0) return;
 
-            // 1. 获取四个节点日期（从DOM实时读取）
-            const investMinDate = investmentPlans.length > 0 
-                ? new Date(Math.min(...investmentPlans.map(p => new Date(p.startDate).getTime())))
-                : null;
-            const investMaxDate = investmentPlans.length > 0 
-                ? new Date(Math.max(...investmentPlans.map(p => new Date(p.type === 'single' ? p.startDate : p.endDate).getTime())))
-                : null;
+            // 1. 获取四个关键日期
+            const firstInvestmentDate = validDates[0]; // 第一笔投资日
+            const latestPortfolioDate = validDates[validDates.length-1]; // 组合最新日
             
             const chartStartInput = document.getElementById('chartStartDate');
             const chartEndInput = document.getElementById('chartEndDate');
             const chartStartDate = chartStartInput?.value ? new Date(chartStartInput.value) : null;
             const chartEndDate = chartEndInput?.value ? new Date(chartEndInput.value) : null;
+            
+            // 确保图表日期在有效范围内
+            const adjustedChartStartDate = chartStartDate && chartStartDate >= validDates[0] && chartStartDate <= validDates[validDates.length-1] 
+                ? chartStartDate : validDates[0];
+            const adjustedChartEndDate = chartEndDate && chartEndDate >= validDates[0] && chartEndDate <= validDates[validDates.length-1] 
+                ? chartEndDate : validDates[validDates.length-1];
 
             // 2. 获取选中的基准数据
             let benchmarkData = null;
@@ -958,86 +971,144 @@
                 benchmarkData = bm ? bm.data : null;
             }
 
-            // 辅助函数：在 validDates 中找到 ≤ targetDate 的最大索引
+            // 辅助函数：在 validDates 中找到与targetDate最接近的索引
             const getIndexForDate = (targetDate) => {
                 if (!targetDate) return -1;
+                // 找到小于等于targetDate的最大日期索引
                 for (let i = validDates.length - 1; i >= 0; i--) {
                     if (validDates[i] <= targetDate) return i;
                 }
-                return -1;
+                return 0; // 如果所有日期都大于targetDate，返回第一个
             };
 
-            // 构建四个候选节点
-            const nodeCandidates = [
-                { name: '投资计划最早', date: investMinDate },
-                { name: '图表开始', date: chartStartDate },
-                { name: '图表结束', date: chartEndDate },
-                { name: '投资计划最晚', date: investMaxDate }
-            ].filter(n => n.date !== null);
+            // 3. 构建四个节点
+            const nodeConfigs = [
+                { 
+                    name: '第一笔投资', 
+                    date: firstInvestmentDate,
+                    getIndex: () => 0 // 总是第一个索引
+                },
+                { 
+                    name: '图表开始', 
+                    date: adjustedChartStartDate,
+                    getIndex: () => getIndexForDate(adjustedChartStartDate)
+                },
+                { 
+                    name: '图表结束', 
+                    date: adjustedChartEndDate,
+                    getIndex: () => getIndexForDate(adjustedChartEndDate)
+                },
+                { 
+                    name: '组合最新', 
+                    date: latestPortfolioDate,
+                    getIndex: () => validDates.length - 1 // 总是最后一个索引
+                }
+            ];
 
-            // 为每个节点找到对应索引
-            const nodesWithIdx = nodeCandidates.map(node => ({
-                ...node,
-                idx: getIndexForDate(node.date)
-            })).filter(node => node.idx !== -1);
-
-            // 去重：相同日期只保留第一个出现的节点（合并名称）
-            const uniqueNodes = [];
-            const seenDates = new Set();
-            for (const node of nodesWithIdx) {
-                const dateKey = formatDate(validDates[node.idx]);
-                if (!seenDates.has(dateKey)) {
-                    seenDates.add(dateKey);
-                    uniqueNodes.push({ ...node, dateKey });
+            // 4. 计算节点索引，处理重叠
+            const nodes = [];
+            const seenIndices = new Set();
+            
+            for (const config of nodeConfigs) {
+                const idx = config.getIndex();
+                if (idx >= 0 && idx < validDates.length) {
+                    if (seenIndices.has(idx)) {
+                        // 如果索引已存在，合并节点名称
+                        const existingNode = nodes.find(n => n.idx === idx);
+                        if (existingNode) {
+                            existingNode.names.push(config.name);
+                        }
+                    } else {
+                        nodes.push({
+                            idx: idx,
+                            date: validDates[idx],
+                            names: [config.name]
+                        });
+                        seenIndices.add(idx);
+                    }
                 }
             }
 
-            if (uniqueNodes.length === 0) return;
+            // 按时间顺序排序节点
+            nodes.sort((a, b) => a.idx - b.idx);
 
-            // 3. 计算基准归一化参数（与 updateCharts 逻辑一致）
-            let firstBenchNav = null;
+            if (nodes.length === 0) return;
+
+            // 5. 计算基准归一化参数
             let bmMap = null;
+            let firstValidBenchNav = null;
+            let firstValidBenchIdx = -1;
+            
             if (benchmarkData) {
                 bmMap = new Map(benchmarkData.map(d => [d.date, d.nav]));
-                // 找到图表数据范围内第一个有效的基准净值
-                for (let d of validDates) {
-                    const nav = bmMap.get(formatDate(d));
+                
+                // 找到第一个有效的基准净值（在validDates范围内）
+                for (let i = 0; i < validDates.length; i++) {
+                    const dateStr = formatDate(validDates[i]);
+                    const nav = bmMap.get(dateStr);
                     if (nav !== undefined) {
-                        firstBenchNav = nav;
+                        firstValidBenchNav = nav;
+                        firstValidBenchIdx = i;
                         break;
                     }
                 }
             }
 
             // 投资最早日期的组合净值作为累计收益基准
-            const baseIdx = uniqueNodes[0].idx;
+            const baseIdx = nodes[0].idx;
             const baseComboNav = netValues[baseIdx];
 
             // 计算基准在 baseIdx 处的对齐净值
             let baseBenchNav = null;
-            if (bmMap && firstBenchNav) {
-                const scale = baseComboNav / firstBenchNav;
-                const rawNav = bmMap.get(formatDate(validDates[baseIdx]));
-                baseBenchNav = rawNav ? rawNav * scale : null;
+            if (bmMap && firstValidBenchNav !== null && firstValidBenchIdx >= 0) {
+                const scale = baseComboNav / firstValidBenchNav;
+                const baseDateStr = formatDate(validDates[baseIdx]);
+                const rawNav = bmMap.get(baseDateStr);
+                // 如果baseIdx处有基准数据，直接使用；否则通过前向填充获取
+                if (rawNav !== undefined) {
+                    baseBenchNav = rawNav * scale;
+                } else {
+                    // 前向填充：找到小于等于baseIdx的最近基准数据
+                    for (let i = baseIdx; i >= 0; i--) {
+                        const dateStr = formatDate(validDates[i]);
+                        const nav = bmMap.get(dateStr);
+                        if (nav !== undefined) {
+                            baseBenchNav = nav * scale;
+                            break;
+                        }
+                    }
+                }
             }
 
-            // 4. 逐行计算数据
+            // 6. 逐行计算数据
             const rows = [];
-            for (let i = 0; i < uniqueNodes.length; i++) {
-                const node = uniqueNodes[i];
+            for (let i = 0; i < nodes.length; i++) {
+                const node = nodes[i];
                 const idx = node.idx;
-                const dateStr = formatDate(validDates[idx]);
+                const dateStr = formatDate(node.date);
                 const comboNav = netValues[idx];
 
                 // 基准净值（对齐后）
                 let benchNav = null;
-                if (bmMap && firstBenchNav) {
-                    const scale = baseComboNav / firstBenchNav;
+                if (bmMap && firstValidBenchNav !== null && firstValidBenchIdx >= 0) {
+                    const scale = baseComboNav / firstValidBenchNav;
                     const rawNav = bmMap.get(dateStr);
-                    benchNav = rawNav ? rawNav * scale : null;
+                    if (rawNav !== undefined) {
+                        benchNav = rawNav * scale;
+                    } else {
+                        // 前向填充
+                        for (let j = idx; j >= 0; j--) {
+                            const fillDateStr = formatDate(validDates[j]);
+                            const fillNav = bmMap.get(fillDateStr);
+                            if (fillNav !== undefined) {
+                                benchNav = fillNav * scale;
+                                break;
+                            }
+                        }
+                    }
                 }
 
-                // 累计收益（相对于投资最早日期）
+                // 累计收益（相对于第一个节点）
                 const comboAccReturn = baseComboNav > 0 ? (comboNav / baseComboNav - 1) * 100 : 0;
                 const benchAccReturn = (benchNav !== null && baseBenchNav !== null && baseBenchNav > 0) 
                     ? (benchNav / baseBenchNav - 1) * 100 : null;
@@ -1046,20 +1117,34 @@
                 // 阶段收益（相对于上一节点）
                 let stageCombo = null, stageBench = null;
                 if (i > 0) {
-                    const prevNode = uniqueNodes[i-1];
+                    const prevNode = nodes[i-1];
                     const prevIdx = prevNode.idx;
                     const prevCombo = netValues[prevIdx];
                     stageCombo = prevCombo > 0 ? (comboNav / prevCombo - 1) * 100 : null;
 
                     if (benchmarkData && benchNav !== null) {
-                        const prevRawNav = bmMap.get(formatDate(validDates[prevIdx]));
-                        const prevBenchNav = prevRawNav ? prevRawNav * (baseComboNav / firstBenchNav) : null;
+                        const prevDateStr = formatDate(validDates[prevIdx]);
+                        const prevRawNav = bmMap.get(prevDateStr);
+                        let prevBenchNav = null;
+                        if (prevRawNav !== undefined) {
+                            prevBenchNav = prevRawNav * (baseComboNav / firstValidBenchNav);
+                        } else {
+                            // 前向填充
+                            for (let j = prevIdx; j >= 0; j--) {
+                                const fillDateStr = formatDate(validDates[j]);
+                                const fillNav = bmMap.get(fillDateStr);
+                                if (fillNav !== undefined) {
+                                    prevBenchNav = fillNav * (baseComboNav / firstValidBenchNav);
+                                    break;
+                                }
+                            }
+                        }
                         stageBench = (prevBenchNav && prevBenchNav > 0) ? (benchNav / prevBenchNav - 1) * 100 : null;
                     }
                 }
 
                 rows.push({
-                    name: node.name,
+                    name: node.names.join('/'), // 如果有重叠，用斜杠分隔
                     date: dateStr,
                     comboNav: comboNav.toFixed(4),
                     benchNav: benchNav !== null ? benchNav.toFixed(4) : '-',
@@ -1071,7 +1156,7 @@
                 });
             }
 
-            // 5. 渲染表格
+            // 7. 渲染表格
             const tbody = document.getElementById('analysisTableBody');
             if (!tbody) return;
             
@@ -1089,7 +1174,6 @@
                 </tr>
             `).join('');
         }
-
     </script>
 </body>
 </html>
