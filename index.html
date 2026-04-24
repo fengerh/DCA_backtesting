@@ -3,7 +3,7 @@
 <head>
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
-    <title>基金组合回测工具 v20260423.1040</title>
+    <title>基金组合回测工具 v20260424.1100</title>
     <!-- 依赖库 -->
     <script src="https://cdn.sheetjs.com/xlsx-0.20.1/package/dist/xlsx.full.min.js"></script>
     <script src="https://cdn.jsdelivr.net/npm/chart.js@4.4.1/dist/chart.umd.min.js"></script>
@@ -65,12 +65,15 @@
             <div class="mt-6 border-t pt-4">
                 <div class="flex items-center justify-between mb-2">
                     <span class="text-sm font-medium text-gray-700">已保存的基准指数：</span>
-                    <span class="text-xs text-gray-500">点击单选即可在净值图中对比</span>
+                    <div class="flex items-center gap-2">
+                        <button id="clearAllBenchmarksBtn" class="text-xs bg-red-100 text-red-700 px-2 py-1 rounded hover:bg-red-200 transition">🗑️ 清空全部</button>
+                        <span class="text-xs text-gray-500">点击单选即可在净值图中对比</span>
+                    </div>
                 </div>
                 <div id="benchmarkList" class="space-y-2 max-h-52 overflow-y-auto border rounded-lg p-2 bg-gray-50">
                     <!-- 动态渲染 -->
                 </div>
-            </div>
+</div>
         </div>
 
         <!-- 2. 添加计划 -->
@@ -370,18 +373,36 @@
             selectedBenchmarks.forEach(b => b.data.forEach(d => allDatesSet.add(d.date)));
             const allDates = Array.from(allDatesSet).sort();
             
-            const maps = selectedBenchmarks.map(b => {
-                const map = new Map(b.data.map(d => [d.date, d.nav]));
-                return { id: b.id, map, name: b.name };
-            });
+            if (allDates.length === 0) {
+                alert('没有可用的日期数据');
+                return;
+            }
             
-            const compositeData = [];
-            for (const date of allDates) {
-                let compositeNav = 0;
-                for (const bm of maps) {
-                    let nav = bm.map.get(date);
+            // 第一步：为每个基准计算归一化净值（以第一个共同日期为基准1.0）
+            const normalizedData = [];
+            
+            for (const bm of selectedBenchmarks) {
+                const bmMap = new Map(bm.data.map(d => [d.date, d.nav]));
+                
+                // 找到该基准在合成期间的第一个有效净值
+                let baseNav = null;
+                for (const date of allDates) {
+                    const nav = bmMap.get(date);
+                    if (nav !== undefined) {
+                        baseNav = nav;
+                        break;
+                    }
+                }
+                
+                if (baseNav === null) continue;
+                
+                // 计算该基准的归一化净值序列
+                const normalizedSeries = [];
+                for (const date of allDates) {
+                    let nav = bmMap.get(date);
                     if (nav === undefined) {
-                        const bmData = selectedBenchmarks.find(b => b.id === bm.id).data;
+                        // 前向填充
+                        const bmData = bm.data;
                         for (let i = bmData.length - 1; i >= 0; i--) {
                             if (bmData[i].date <= date) {
                                 nav = bmData[i].nav;
@@ -390,11 +411,43 @@
                         }
                     }
                     if (nav !== undefined) {
-                        const weight = compositeWeights[bm.id] / 100;
-                        compositeNav += nav * weight;
+                        normalizedSeries.push({
+                            date: date,
+                            normalizedNav: nav / baseNav  // 归一化到1.0
+                        });
                     }
                 }
-                if (compositeNav > 0) {
+                
+                if (normalizedSeries.length > 0) {
+                    normalizedData.push({
+                        id: bm.id,
+                        name: bm.name,
+                        weight: compositeWeights[bm.id] / 100,  // 转换为小数权重
+                        series: normalizedSeries
+                    });
+                }
+            }
+            
+            if (normalizedData.length === 0) {
+                alert('未能生成有效合成数据');
+                return;
+            }
+            
+            // 第二步：按日期加权合成
+            const compositeData = [];
+            for (const date of allDates) {
+                let compositeNav = 0;
+                let hasData = false;
+                
+                for (const bm of normalizedData) {
+                    const dayData = bm.series.find(d => d.date === date);
+                    if (dayData) {
+                        compositeNav += dayData.normalizedNav * bm.weight;
+                        hasData = true;
+                    }
+                }
+                
+                if (hasData && compositeNav > 0) {
                     compositeData.push({ date, nav: compositeNav });
                 }
             }
@@ -409,9 +462,8 @@
             for (const bm of selectedBenchmarks) {
                 const weight = compositeWeights[bm.id];
                 if (weight > 0) {
-                    // 将权重格式化为整数（如果为整数）或保留一位小数
                     const formattedWeight = Number.isInteger(weight) ? weight.toFixed(0) : weight.toFixed(1);
-                    nameParts.push(`${bm.name} ${formattedWeight}%`);
+                    nameParts.push(`${bm.name}*${formattedWeight}%`);
                 }
             }
             const name = '合成_' + nameParts.join('+');
@@ -423,7 +475,17 @@
             alert(`合成基准 "${name}" 已生成，共 ${compositeData.length} 条记录`);
         }
 
-
+        // 清空所有基准数据
+        async function clearAllBenchmarks() {
+            if (confirm('确定要清空所有已保存的基准吗？此操作不可恢复。')) {
+                await db.benchmarks.clear();
+                currentBenchmarkId = null;
+                document.getElementById('benchmarkSelect').value = '';
+                await loadBenchmarkList();
+                if (backtestResult.dates.length) updateCharts();
+                alert('已清空所有基准数据');
+            }
+        }
 
         // 解析Sheet数据
         function parseSheetData(sheet) {
@@ -889,7 +951,14 @@
                     responsive: true,
                     interaction: { mode: 'index', intersect: false },
                     plugins: {
-                        tooltip: { mode: 'index' },
+                        tooltip: { 
+                            mode: 'index',
+                            callbacks: {
+                                label: function(context) {
+                                    return context.dataset.label + ': ' + context.parsed.y.toFixed(4);// 显示精度到0.0001
+                                }
+                            }
+                        },
                         legend: { labels: { usePointStyle: true } }
                     },
                     scales: {
@@ -899,13 +968,13 @@
                             position: 'left',
                             title: { 
                                 display: true, 
-                                text: `净值 (起始日 ${startNetValue.toFixed(3)})` 
+                                text: `净值 (起始日 ${startNetValue.toFixed(4)})` 
                             },
                             min: minVal - padding,
                             max: maxVal + padding,
                             ticks: {
                                 callback: function(value) {
-                                    return value.toFixed(3);
+                                    return value.toFixed(4);
                                 }
                             }
                         },
@@ -942,6 +1011,14 @@
 
             renderAnalysisTable();
         }
+
+        // 绑定事件（放在页面加载完成后）
+        document.addEventListener('DOMContentLoaded', function() {
+            const clearBtn = document.getElementById('clearAllBenchmarksBtn');
+            if (clearBtn) {
+                clearBtn.addEventListener('click', clearAllBenchmarks);
+            }
+        });
 
         // 渲染关键节点分析表格（修正版：四个固定节点）
         async function renderAnalysisTable() {
