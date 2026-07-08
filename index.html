@@ -3,7 +3,7 @@
 <head>
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
-    <title>基金组合回测工具 v20260424.1100</title>
+    <title>基金组合回测工具 v20260708.1330</title>
     <!-- 依赖库 -->
     <script src="https://cdn.sheetjs.com/xlsx-0.20.1/package/dist/xlsx.full.min.js"></script>
     <script src="https://cdn.jsdelivr.net/npm/chart.js@4.4.1/dist/chart.umd.min.js"></script>
@@ -120,6 +120,8 @@
             <h2 class="text-xl font-semibold mb-4 text-gray-700">3. 投资计划列表</h2>
             <div id="planList" class="space-y-2"></div>
             <button onclick="clearAllPlans()" class="mt-4 bg-gray-500 text-white px-4 py-2 rounded-lg hover:bg-gray-600 transition text-sm">清空全部计划</button>
+            <button onclick="checkNavGaps()" class="mt-4 ml-2 bg-amber-500 text-white px-4 py-2 rounded-lg hover:bg-amber-600 transition text-sm">检测净值空档</button>
+            <div id="navGapHint" class="mt-3 hidden"></div>
         </div>
 
         <!-- 4. 回测结果 -->
@@ -201,6 +203,7 @@
         // ---------- 全局变量 ----------
         let fundsData = {};
         let investmentPlans = [];
+        let fillMissingNav = false;   // 是否对空白净值做前向填充（按前一交易日净值模拟）
         let assetChart = null;
         let netValueChart = null;
         //let compositeWeights = {}; // 临时存储各基准权重 { benchmarkId: weight }
@@ -244,6 +247,36 @@
                 }
             }
             return new Date(NaN);
+        }
+
+        // Excel 序列号 -> 本地日期（时区安全：取 UTC 日期分量按本地构造，避免差一天）
+        function excelSerialToDate(serial) {
+            const utcMs = Math.round((serial - 25569) * 86400000);
+            const d = new Date(utcMs);
+            return new Date(d.getUTCFullYear(), d.getUTCMonth(), d.getUTCDate());
+        }
+
+        // 增强解析：Date对象 / 数字序列号 / yyyy-mm-dd / yyyy/m/d / yyyy年m月d日 / yyyymmdd / 纯数字
+        function parseDateFlexible(raw) {
+            if (raw == null) return null;
+            if (raw instanceof Date) return raw;
+            if (typeof raw === 'number') return excelSerialToDate(raw);
+            if (typeof raw !== 'string') return null;
+            const s = raw.trim();
+            if (!s) return null;
+            const d = parseDateString(s);                 // 已有的 yyyy-mm-dd / yyyy/m/d
+            if (!isNaN(d.getTime())) return d;
+            let m = s.match(/^(\d{4})\s*年\s*(\d{1,2})\s*月\s*(\d{1,2})\s*日\s*$/);
+            if (m) {
+                const dt = new Date(+m[1], +m[2] - 1, +m[3]);
+                if (!isNaN(dt.getTime())) return dt;
+            }
+            if (/^\d{8}$/.test(s)) {                       // 紧凑 yyyymmdd
+                const dt = new Date(+s.slice(0,4), +s.slice(4,6) - 1, +s.slice(6,8));
+                if (!isNaN(dt.getTime())) return dt;
+            }
+            if (/^\d+(\.\d+)?$/.test(s)) return excelSerialToDate(parseFloat(s)); // 数字序列号
+            return null;
         }
 
         // 基准列表渲染（含日期范围）
@@ -489,33 +522,16 @@
 
         // 解析Sheet数据
         function parseSheetData(sheet) {
-            const json = XLSX.utils.sheet_to_json(sheet, { header: 1, raw: false });
+            const json = XLSX.utils.sheet_to_json(sheet, { header: 1, raw: true });
             if (json.length < 2) return [];
             const data = [];
             for (let i = 1; i < json.length; i++) {
                 const row = json[i];
                 if (!row || row.length < 2) continue;
-                let rawDate = row[0];
-                let nav = parseFloat(row[1]);
+                const rawDate = row[0];
+                const nav = parseFloat(row[1]);
                 if (isNaN(nav)) continue;
-                
-                let date;
-                if (rawDate instanceof Date) {
-                    date = rawDate;
-                } else if (typeof rawDate === 'string') {
-                    // 先尝试解析字符串日期
-                    date = parseDateString(rawDate);
-                    if (isNaN(date.getTime())) {
-                        // 如果字符串看起来像纯数字（Excel序列），再尝试转换
-                        if (/^\d+$/.test(rawDate)) {
-                            const excelNum = parseInt(rawDate);
-                            date = new Date((excelNum - 25569) * 86400 * 1000);
-                        }
-                    }
-                } else if (typeof rawDate === 'number') {
-                    date = new Date((rawDate - 25569) * 86400 * 1000);
-                }
-                
+                const date = parseDateFlexible(rawDate);
                 if (!date || isNaN(date.getTime())) continue;
                 data.push({ date: formatDate(date), nav });
             }
@@ -542,16 +558,16 @@
                     if (parsed.length === 0) continue;
                     let benchmarkName = sheetName;
                     if (sheetNames.length === 1) {
-                        const custom = nameInput.value.trim();
+                        const custom = nameInput && nameInput.value.trim();
                         if (custom) benchmarkName = custom;
                     }
                     await db.benchmarks.add({ name: benchmarkName, data: parsed });
                     importCount++;
                 }
-                if (importCount === 0) alert('未解析到有效数据，请检查日期列格式（支持yyyy-mm-dd或yyyy/m/d）');
+                if (importCount === 0) alert('未解析到有效数据，请检查日期列格式（支持 Excel 日期、数字序列号、yyyy-mm-dd、yyyy/m/d、yyyy年m月d日、yyyymmdd）');
                 else alert(`成功导入 ${importCount} 个基准`);
                 fileInput.value = '';
-                nameInput.value = '沪深300';
+                if (nameInput) nameInput.value = '沪深300';
                 await loadBenchmarkList();
             };
             reader.readAsArrayBuffer(file);
@@ -609,11 +625,11 @@
                 let infoHtml = '<div class="font-medium text-green-600 mb-2">✅ 已加载基金：</div><ul class="list-disc list-inside space-y-1">';
                 workbook.SheetNames.forEach(name => {
                     const sheet = workbook.Sheets[name];
-                    const json = XLSX.utils.sheet_to_json(sheet, {header: 1, raw: false});
+                    const json = XLSX.utils.sheet_to_json(sheet, {header: 1, raw: true});
                     const dates = [], nav = [], div = [];
                     for (let i = 1; i < json.length; i++) {
                         if (json[i][0] && json[i][1] !== undefined) {
-                            const date = new Date(json[i][0]);
+                            const date = parseDateFlexible(json[i][0]);
                             if (!isNaN(date.getTime())) {
                                 dates.push(date);
                                 nav.push(parseFloat(json[i][1]));
@@ -680,9 +696,51 @@
                 investmentPlans[existingIndex] = plan;
             } else investmentPlans.push(plan);
             renderPlanList();
+            checkNavGaps();
         }
-        function deletePlan(id) { investmentPlans = investmentPlans.filter(p => p.id !== id); renderPlanList(); }
-        function clearAllPlans() { if (confirm('清空所有计划？')) { investmentPlans = []; renderPlanList(); } }
+        function deletePlan(id) { investmentPlans = investmentPlans.filter(p => p.id !== id); renderPlanList(); checkNavGaps(); }
+        function clearAllPlans() { if (confirm('清空所有计划？')) { investmentPlans = []; renderPlanList(); checkNavGaps(); } }
+
+        // 检测基金净值空档：以计划内所有基金日期并集为参照日历，若某基金成立后、参照日历有而自身缺，则视为空白
+        function checkNavGaps() {
+            const hint = document.getElementById('navGapHint');
+            if (!hint) return;
+            if (investmentPlans.length === 0) { hint.classList.add('hidden'); hint.innerHTML = ''; return; }
+
+            const allSet = new Set();
+            const fundsInPlan = [...new Set(investmentPlans.map(p => p.fund))];
+            fundsInPlan.forEach(code => {
+                const f = fundsData[code];
+                if (f) f.dates.forEach(d => allSet.add(formatDate(d)));
+            });
+            const allStrs = Array.from(allSet).sort();
+
+            const gapFunds = [];
+            fundsInPlan.forEach(code => {
+                const f = fundsData[code];
+                if (!f || f.dates.length === 0) return;
+                const firstDs = formatDate(f.dates[0]);          // 基金成立日
+                const ownSet = new Set(f.dates.map(d => formatDate(d)));
+                let missing = 0;
+                for (const ds of allStrs) {
+                    if (ds < firstDs) continue;                  // 尚未成立，不算空白
+                    if (!ownSet.has(ds)) missing++;              // 成立后、参照日历有而本基金缺 -> 空白
+                }
+                if (missing > 0) gapFunds.push({ code, missing });
+            });
+
+            if (gapFunds.length === 0) {
+                hint.classList.remove('hidden');
+                hint.innerHTML = '<span class="text-green-600 text-sm">✓ 所有基金净值日期一致，无需填充。</span>';
+                return;
+            }
+            const names = gapFunds.map(g => `${g.code}(缺失${g.missing}天)`).join('、');
+            hint.classList.remove('hidden');
+            hint.innerHTML = `⚠ 检测到以下基金相对于其它基金存在空白净值：${names}。缺失日将按前一交易日净值模拟填充。
+                <label class="ml-2 inline-flex items-center gap-1 text-sm font-medium text-amber-700 cursor-pointer">
+                    <input type="checkbox" id="fillNavCheck" ${fillMissingNav ? 'checked' : ''} onchange="fillMissingNav=this.checked"> 填充空白净值
+                </label>`;
+        }
         function renderPlanList() {
             const container = document.getElementById('planList');
             if (investmentPlans.length === 0) { container.innerHTML = '<p class="text-gray-500 text-sm">暂无计划</p>'; return; }
@@ -711,6 +769,21 @@
             const allDates = allDateStrs.map(str => new Date(str + 'T00:00:00'));
             const earliestInvestDate = new Date(Math.min(...investmentPlans.map(p => new Date(p.startDate).getTime())));
 
+            // 为每个基金构建前向填充净值表：参照并集日期，成立后缺失日用最近一次已知净值填充
+            const fundNavMap = {};
+            Object.keys(fundsData).forEach(code => {
+                const f = fundsData[code];
+                const realNav = new Map(f.dates.map((d, i) => [formatDate(d), f.nav[i]]));
+                const m = new Map();
+                let lastNav = null;            // 基金尚未成立时为 null，不填充
+                for (const ds of allDateStrs) {
+                    if (realNav.has(ds)) lastNav = realNav.get(ds);
+                    if (lastNav !== null) m.set(ds, lastNav);
+                }
+                fundNavMap[code] = m;
+            });
+            const doFill = fillMissingNav;
+
             for (let dtIdx = 0; dtIdx < allDates.length; dtIdx++) {
                 const currentDt = allDates[dtIdx];
                 const dateStr = allDateStrs[dtIdx];
@@ -731,9 +804,15 @@
                 for (const plan of investmentPlans) {
                     const fund = plan.fund;
                     const fundData = fundsData[fund];
-                    const fundDateIdx = fundData.dates.findIndex(d => formatDate(d) === dateStr);
-                    if (fundDateIdx === -1) continue;
-                    const nav = fundData.nav[fundDateIdx];
+                    let nav;
+                    if (doFill) {
+                        nav = fundNavMap[fund].get(dateStr);
+                        if (nav === undefined) continue;        // 基金尚未成立
+                    } else {
+                        const fundDateIdx = fundData.dates.findIndex(d => formatDate(d) === dateStr);
+                        if (fundDateIdx === -1) continue;
+                        nav = fundData.nav[fundDateIdx];
+                    }
                     const amt = plan.amount;
                     const currentDateStr = dateStr;
                     let shouldInvest = false;
@@ -758,8 +837,10 @@
                 let mv = 0;
                 for (const code of Object.keys(fundShares)) {
                     const fundData = fundsData[code];
-                    const idx = fundData.dates.findIndex(d => formatDate(d) === dateStr);
-                    if (idx !== -1) mv += fundShares[code] * fundData.nav[idx];
+                    let nav;
+                    if (doFill) nav = fundNavMap[code].get(dateStr);
+                    else { const idx = fundData.dates.findIndex(d => formatDate(d) === dateStr); if (idx !== -1) nav = fundData.nav[idx]; }
+                    if (nav !== undefined) mv += fundShares[code] * nav;
                 }
                 dailyAsset.push(mv + totalCash);
                 dailyDates.push(new Date(currentDt));
