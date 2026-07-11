@@ -3,7 +3,7 @@
 <head>
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
-    <title>基金组合回测工具 v20260709.0943</title>
+    <title>基金组合回测工具 v20260711.1111</title>
     <!-- 依赖库 -->
     <script src="https://cdn.sheetjs.com/xlsx-0.20.1/package/dist/xlsx.full.min.js"></script>
     <script src="https://cdn.jsdelivr.net/npm/chart.js@4.4.1/dist/chart.umd.min.js"></script>
@@ -87,7 +87,10 @@
 
         <!-- 2. 添加计划 -->
         <div class="bg-white p-6 rounded-xl shadow-md mb-6" id="planSection" style="display:none;">
-            <h2 class="text-xl font-semibold mb-4 text-gray-700">2. 添加投资计划</h2>
+            <div class="flex items-center justify-between mb-4">
+                <h2 class="text-xl font-semibold text-gray-700">2. 添加投资计划</h2>
+                <button onclick="addPlan()" class="bg-blue-600 text-white px-6 py-2 rounded-lg hover:bg-blue-700 transition font-medium">添加计划</button>
+            </div>
             <div class="grid grid-cols-1 md:grid-cols-3 gap-4">
                 <div>
                     <label class="block text-sm font-medium text-gray-700 mb-1">选择基金</label>
@@ -121,25 +124,60 @@
                     </select>
                 </div>
             </div>
-            <button onclick="addPlan()" class="mt-4 bg-blue-600 text-white px-6 py-2 rounded-lg hover:bg-blue-700 transition font-medium">添加计划</button>
         </div>
 
         <!-- 3. 计划列表 -->
         <div class="bg-white p-6 rounded-xl shadow-md mb-6" id="planListSection" style="display:none;">
-            <h2 class="text-xl font-semibold mb-4 text-gray-700">3. 投资计划列表</h2>
-            <div id="planList" class="space-y-2"></div>
-            <button onclick="clearAllPlans()" class="mt-4 bg-gray-500 text-white px-4 py-2 rounded-lg hover:bg-gray-600 transition text-sm">清空全部计划</button>
-            <button onclick="checkNavGaps()" class="mt-4 ml-2 bg-amber-500 text-white px-4 py-2 rounded-lg hover:bg-amber-600 transition text-sm">检测净值空档</button>
+            <div class="flex items-center justify-between mb-4">
+                <h2 class="text-xl font-semibold text-gray-700">3. 投资计划列表</h2>
+                <div class="flex gap-2">
+                    <button onclick="clearAllPlans()" class="bg-gray-500 text-white px-4 py-2 rounded-lg hover:bg-gray-600 transition text-sm">清空全部计划</button>
+                    <button onclick="checkNavGaps()" class="bg-amber-500 text-white px-4 py-2 rounded-lg hover:bg-amber-600 transition text-sm">检测净值空档</button>
+                </div>
+            </div>
+            <div id="planList" class="space-y-2 mb-4"></div>
             <div id="navGapHint" class="mt-3 hidden"></div>
         </div>
 
         <!-- 4. 回测结果 -->
         <div class="bg-white p-6 rounded-xl shadow-md mb-6" id="resultSection" style="display:none;">
-            <h2 class="text-xl font-semibold mb-4 text-gray-700">4. 回测结果</h2>
-            <button onclick="runBacktest()" class="mb-6 bg-green-600 text-white px-8 py-3 rounded-lg hover:bg-green-700 transition font-semibold text-lg">🚀 启动回测</button>
+            <div class="flex items-center justify-between mb-6">
+                <h2 class="text-xl font-semibold text-gray-700">4. 回测结果</h2>
+                <button onclick="runBacktest()" class="bg-green-600 text-white px-8 py-3 rounded-lg hover:bg-green-700 transition font-semibold text-lg">🚀 启动回测</button>
+            </div>
             
             <div id="metrics" class="grid grid-cols-1 md:grid-cols-4 gap-4 mb-6"></div>
-            
+
+            <!-- 盈利概率 -->
+            <div id="profitProbabilitySection" class="bg-white p-6 rounded-xl shadow-md mb-6" style="display:none;">
+                <h3 class="text-lg font-semibold mb-3 text-gray-700">盈利概率</h3>
+                <div class="flex flex-wrap items-center gap-3 mb-3">
+                    <span class="text-sm font-medium text-gray-700">测算口径：</span>
+                    <div class="inline-flex rounded-lg border border-gray-300 overflow-hidden">
+                        <button id="ppModeDca" onclick="setProfitMode('dca')" class="px-3 py-1.5 text-sm bg-blue-600 text-white">定投模拟</button>
+                        <button id="ppModeTwr" onclick="setProfitMode('twr')" class="px-3 py-1.5 text-sm bg-white text-gray-700 hover:bg-gray-100">组合净值</button>
+                    </div>
+                    <span class="text-xs text-gray-400">定投模拟=资金加权（推荐）；组合净值=一次性买入时间加权</span>
+                </div>
+                <p class="text-sm text-gray-500 mb-4">历史任意时点起投，持有满对应时长后的盈利概率、平均持有收益与年化收益率（持有期以交易日近似，1 自然年 ≈ 252 交易日）。</p>
+                <div class="flex flex-wrap items-center gap-3 mb-4">
+                    <label class="text-sm font-medium text-gray-700">自定义持有期（年）：</label>
+                    <input type="number" id="customHoldYears" min="0.1" step="0.5" value="1" class="w-24 p-2 border border-gray-300 rounded-lg focus:ring-2 focus:ring-blue-500">
+                    <button onclick="addCustomPeriod()" class="bg-blue-600 text-white px-3 py-2 rounded-lg hover:bg-blue-700 transition text-sm">添加档位</button>
+                    <button onclick="clearCustomPeriods()" class="bg-gray-500 text-white px-3 py-2 rounded-lg hover:bg-gray-600 transition text-sm">清除自定义</button>
+                </div>
+                <div id="profitProbabilityTable" class="overflow-x-auto"></div>
+            </div>
+
+            <!-- 相关性分析 -->
+            <div id="correlationSection" class="bg-white p-6 rounded-xl shadow-md mb-6" style="display:none;">
+                <h3 class="text-lg font-semibold mb-3 text-gray-700">相关性分析</h3>
+                <p class="text-sm text-gray-500 mb-4">投资计划中各基金日收益率（以交易日对齐）的皮尔逊相关系数矩阵。</p>
+                <div id="correlationTable" class="overflow-x-auto"></div>
+                <div id="correlationLegend" class="mt-4"></div>
+                <p class="text-xs text-gray-400 mt-3">本页面展示收益相关数据仅为历史数据测算，不构成收益保证或预示其未来表现。</p>
+            </div>
+
             <!-- 图表日期范围筛选 -->
             <div class="bg-gray-50 p-4 rounded-lg mb-6" id="chartFilter" style="display:none;">
                 <h3 class="text-lg font-semibold mb-3 text-gray-700">图表日期范围筛选</h3>
@@ -223,6 +261,8 @@
         let fundsData = {};
         let investmentPlans = [];
         let fillMissingNav = false;   // 是否对空白净值做前向填充（按前一交易日净值模拟）
+        let customPeriods = [];       // 盈利概率自定义持有期（年）
+        let profitMode = 'dca';       // 盈利概率口径：'dca'=定投模拟(资金加权) / 'twr'=组合净值(一次性买入)
         let assetChart = null;
         let netValueChart = null;
         //let compositeWeights = {}; // 临时存储各基准权重 { benchmarkId: weight }
@@ -804,16 +844,31 @@
 
             // 为每个基金构建前向填充净值表：参照并集日期，成立后缺失日用最近一次已知净值填充
             const fundNavMap = {};
+            const simNav = {};        // 与 allDateStrs 对齐的前向填充净值数组（未成立为 null）
+            const simDiv = {};        // 与 allDateStrs 对齐的每份额分红数组（无分红为 0）
+            const simDow = new Array(allDateStrs.length);   // 每日期的星期（0=周日），避免热循环中重复构造 Date
+            for (let k = 0; k < allDateStrs.length; k++) simDow[k] = new Date(allDateStrs[k] + 'T00:00:00').getUTCDay();
+            // 预缓存时间戳与“日”数值，供定投模拟热循环直接使用（消除内层 new Date 与字符串 split）
+            const simDateTs = new Array(allDateStrs.length);
+            const simDayOfMonth = new Array(allDateStrs.length);
+            for (let k = 0; k < allDateStrs.length; k++) { simDateTs[k] = allDates[k].getTime(); simDayOfMonth[k] = parseInt(allDateStrs[k].split('-')[2], 10); }
             Object.keys(fundsData).forEach(code => {
                 const f = fundsData[code];
                 const realNav = new Map(f.dates.map((d, i) => [formatDate(d), f.nav[i]]));
+                const realDiv = new Map(f.dates.map((d, i) => [formatDate(d), f.div[i]]));
                 const m = new Map();
+                const navArr = new Array(allDateStrs.length).fill(null);
+                const divArr = new Array(allDateStrs.length).fill(0);
                 let lastNav = null;            // 基金尚未成立时为 null，不填充
-                for (const ds of allDateStrs) {
+                for (let k = 0; k < allDateStrs.length; k++) {
+                    const ds = allDateStrs[k];
                     if (realNav.has(ds)) lastNav = realNav.get(ds);
-                    if (lastNav !== null) m.set(ds, lastNav);
+                    if (lastNav !== null) { m.set(ds, lastNav); navArr[k] = lastNav; }
+                    if (realDiv.has(ds)) divArr[k] = realDiv.get(ds);
                 }
                 fundNavMap[code] = m;
+                simNav[code] = navArr;
+                simDiv[code] = divArr;
             });
             const doFill = fillMissingNav;
 
@@ -939,27 +994,28 @@
                 }
                 maxDDDuration = maxSpan;
             }
-            backtestResult = { dates: validDates, assets: validAssets, netValues, invests: validInvest, cashDivs: validCashDivs };
+            backtestResult = { dates: validDates, assets: validAssets, netValues, invests: validInvest, cashDivs: validCashDivs,
+                simDateStrs: allDateStrs, simNav: simNav, simDiv: simDiv, simDow: simDow, simDateTs: simDateTs, simDayOfMonth: simDayOfMonth, simStartIdx: startIdx };
 
             const twrHtml = isNaN(annualReturnPct) ? '-' : annualReturnPct.toFixed(2) + '%';
             const winHtml = isNaN(winRate) ? '-' : winRate.toFixed(1) + '%';
             let riskHtml = validDates.length >= MIN_TRADE_DAYS ? `
-                <div class="bg-red-50 p-4 rounded-lg text-center"><div class="text-sm text-gray-600">最大回撤</div><div class="text-2xl font-bold text-red-700">${maxDrawdown.toFixed(2)}%</div></div>
-                <div class="bg-rose-50 p-4 rounded-lg text-center"><div class="text-sm text-gray-600">回撤持续天数</div><div class="text-2xl font-bold text-rose-700">${maxDDDuration.toFixed(0)} 天</div></div>
-                <div class="bg-orange-50 p-4 rounded-lg text-center"><div class="text-sm text-gray-600">年化波动率</div><div class="text-2xl font-bold text-orange-700">${(annualVolatility*100).toFixed(2)}%</div></div>
-                <div class="bg-teal-50 p-4 rounded-lg text-center"><div class="text-sm text-gray-600">夏普/卡玛</div><div class="text-2xl font-bold text-teal-700">${sharpeRatio.toFixed(2)}/${calmarRatio.toFixed(2)}</div></div>
-            ` : `<div class="bg-gray-100 p-4 rounded-lg text-center col-span-4"><div class="text-sm text-gray-600">风险指标</div><div class="text-xl font-medium text-gray-500">投资时间不足${MIN_TRADE_DAYS}个交易日，以下指标暂不可用</div></div>`;
+                <div class="bg-rose-50 p-4 rounded-lg text-center" data-mkey="最大回撤"><div class="text-sm text-slate-500">最大回撤</div><div class="text-2xl font-bold text-rose-600">${maxDrawdown.toFixed(2)}%</div></div>
+                <div class="bg-rose-50 p-4 rounded-lg text-center" data-mkey="回撤持续天数"><div class="text-sm text-slate-500">回撤持续天数</div><div class="text-2xl font-bold text-rose-600">${maxDDDuration.toFixed(0)} 天</div></div>
+                <div class="bg-rose-50 p-4 rounded-lg text-center" data-mkey="年化波动率"><div class="text-sm text-slate-500">年化波动率</div><div class="text-2xl font-bold text-rose-600">${(annualVolatility*100).toFixed(2)}%</div></div>
+                <div class="bg-rose-50 p-4 rounded-lg text-center" data-mkey="夏普/卡玛"><div class="text-sm text-slate-500">夏普/卡玛</div><div class="text-2xl font-bold text-rose-600">${sharpeRatio.toFixed(2)}/${calmarRatio.toFixed(2)}</div></div>
+            ` : `<div class="bg-gray-100 p-4 rounded-lg text-center col-span-4" data-mkey="风险指标"><div class="text-sm text-gray-600">风险指标</div><div class="text-xl font-medium text-gray-500">投资时间不足${MIN_TRADE_DAYS}个交易日，以下指标暂不可用</div></div>`;
 
             document.getElementById('metrics').innerHTML = `
-                <div class="bg-blue-50 p-4 rounded-lg text-center"><div class="text-sm text-gray-600">总投入本金</div><div class="text-2xl font-bold text-blue-700">${totalInvest.toFixed(2)} 元</div></div>
-                <div class="bg-green-50 p-4 rounded-lg text-center"><div class="text-sm text-gray-600">持仓市值</div><div class="text-2xl font-bold text-green-700">${marketValue.toFixed(2)} 元</div></div>
-                <div class="bg-yellow-50 p-4 rounded-lg text-center"><div class="text-sm text-gray-600">累计现金分红</div><div class="text-2xl font-bold text-yellow-700">${cashDiv.toFixed(2)} 元</div></div>
-                <div class="bg-purple-50 p-4 rounded-lg text-center"><div class="text-sm text-gray-600">总资产</div><div class="text-2xl font-bold text-purple-700">${totalAsset.toFixed(2)} 元</div></div>
+                <div class="bg-blue-50 p-4 rounded-lg text-center" data-mkey="总投入本金"><div class="text-sm text-slate-500">总投入本金</div><div class="text-2xl font-bold text-blue-700">${totalInvest.toFixed(2)} 元</div></div>
+                <div class="bg-blue-50 p-4 rounded-lg text-center" data-mkey="持仓市值"><div class="text-sm text-slate-500">持仓市值</div><div class="text-2xl font-bold text-blue-700">${marketValue.toFixed(2)} 元</div></div>
+                <div class="bg-blue-50 p-4 rounded-lg text-center" data-mkey="累计现金分红"><div class="text-sm text-slate-500">累计现金分红</div><div class="text-2xl font-bold text-blue-700">${cashDiv.toFixed(2)} 元</div></div>
+                <div class="bg-blue-50 p-4 rounded-lg text-center" data-mkey="总资产"><div class="text-sm text-slate-500">总资产</div><div class="text-2xl font-bold text-blue-700">${totalAsset.toFixed(2)} 元</div></div>
 
-                <div class="bg-indigo-50 p-4 rounded-lg text-center"><div class="text-sm text-gray-600">累计收益率</div><div class="text-2xl font-bold text-indigo-700">${totalReturn.toFixed(2)}%</div></div>
-                <div class="bg-pink-50 p-4 rounded-lg text-center"><div class="text-sm text-gray-600">XIRR年化</div><div class="text-2xl font-bold text-pink-700">${isNaN(xirrVal)?'-':xirrVal.toFixed(2)+'%'}</div></div>
-                <div class="bg-cyan-50 p-4 rounded-lg text-center"><div class="text-sm text-gray-600">年化收益率(时间加权)</div><div class="text-2xl font-bold text-cyan-700">${twrHtml}</div></div>
-                <div class="bg-emerald-50 p-4 rounded-lg text-center"><div class="text-sm text-gray-600">胜率(正收益日占比)</div><div class="text-2xl font-bold text-emerald-700">${winHtml}</div></div>
+                <div class="bg-emerald-50 p-4 rounded-lg text-center" data-mkey="累计收益率"><div class="text-sm text-slate-500">累计收益率</div><div class="text-2xl font-bold text-emerald-800">${totalReturn.toFixed(2)}%</div></div>
+                <div class="bg-emerald-50 p-4 rounded-lg text-center" data-mkey="XIRR年化"><div class="text-sm text-slate-500">XIRR年化</div><div class="text-2xl font-bold text-emerald-800">${isNaN(xirrVal)?'-':xirrVal.toFixed(2)+'%'}</div></div>
+                <div class="bg-emerald-50 p-4 rounded-lg text-center" data-mkey="年化收益率(时间加权)"><div class="text-sm text-slate-500">年化收益率(时间加权)</div><div class="text-2xl font-bold text-emerald-800">${twrHtml}</div></div>
+                <div class="bg-emerald-50 p-4 rounded-lg text-center" data-mkey="胜率(正收益日占比)"><div class="text-sm text-slate-500">胜率(正收益日占比)</div><div class="text-2xl font-bold text-emerald-800">${winHtml}</div></div>
 
                 ${riskHtml}
             `;
@@ -977,6 +1033,486 @@
             }
             updateCharts();
             renderAnalysisTable(); // 确保调用的是异步函数
+            renderProfitProbability();
+            renderCorrelationMatrix();
+        }
+
+        // ============ 盈利概率 & 相关性分析 ============
+
+        // 在 [winStartIdx, winEndIdx] 闭区间（对齐 simDateStrs）内重放全部投资计划，
+        // 返回该窗口的资金加权持有收益与 XIRR 年化；区间内无扣款则返回 null。
+        // 采用“以窗口起点为锚点”的解释：即“假设在历史任意时点开始同一套定投计划并持有 holdDays”。
+        function simulateDcaWindow(winStartIdx, winEndIdx) {
+            const dateStrs = backtestResult.simDateStrs;
+            const simNav = backtestResult.simNav;
+            const simDiv = backtestResult.simDiv;
+            const simDow = backtestResult.simDow;
+            const simDateTs = backtestResult.simDateTs;
+            const simDayOfMonth = backtestResult.simDayOfMonth;
+            if (!dateStrs || !simNav || !simDateTs) return null;
+            const shares = {};
+            let totalCash = 0;
+            const cashFlows = [], flowDates = [];
+            let invested = 0;
+            for (const plan of investmentPlans) {
+                const fund = plan.fund;
+                const navArr = simNav[fund];
+                const divArr = simDiv[fund];
+                if (!navArr) continue;
+                if (shares[fund] === undefined) shares[fund] = 0;
+                for (let k = winStartIdx; k <= winEndIdx; k++) {
+                    const nav = navArr[k];
+                    if (nav === null || nav === undefined) continue;   // 基金尚未成立
+                    const ds = dateStrs[k];
+                    // 分红处理（基于已持有份额）
+                    if (shares[fund] > 0) {
+                        const divPerShare = divArr[k] || 0;
+                        if (divPerShare > 0) {
+                            const totalDiv = shares[fund] * divPerShare;
+                            if (plan.div === 'reinvest') shares[fund] += totalDiv / nav;
+                            else { totalCash += totalDiv; cashFlows.push(totalDiv); flowDates.push(simDateTs[k]); }
+                        }
+                    }
+                    // 扣款判定（以窗口起点为锚）
+                    let shouldInvest = false;
+                    if (plan.type === 'single') { if (k === winStartIdx) shouldInvest = true; }
+                    else if (plan.type === 'weekly') { if (k >= winStartIdx && simDow[k] === 1) shouldInvest = true; }
+                    else if (plan.type === 'monthly') { if (k >= winStartIdx && simDayOfMonth[k] === 1) shouldInvest = true; }
+                    if (shouldInvest) {
+                        shares[fund] += plan.amount / nav;
+                        invested += plan.amount;
+                        cashFlows.push(-plan.amount);
+                        flowDates.push(simDateTs[k]);
+                    }
+                }
+            }
+            if (invested <= 0) return null;
+            let mv = 0;
+            for (const fund of Object.keys(shares)) {
+                const endNav = simNav[fund][winEndIdx];
+                if (endNav !== null && endNav !== undefined) mv += shares[fund] * endNav;
+            }
+            mv += totalCash;
+            const holdingReturn = mv / invested - 1;
+            cashFlows.push(mv);
+            flowDates.push(simDateTs[winEndIdx]);
+            const x = xirr(cashFlows, flowDates);
+            const xirrAnnual = isNaN(x) ? NaN : x;
+            return { holdingReturn, xirrAnnual };
+        }
+
+        // 给定持有期（交易日），按指定口径计算盈利概率、平均持有收益与平均年化收益
+        // mode: 'dca' = 定投模拟（资金加权，推荐）；'twr' = 组合净值（一次性买入，时间加权）
+        function calcProfit(holdDays, mode) {
+            mode = mode || 'dca';
+            const nv = backtestResult.netValues || [];
+            const n = nv.length;
+            if (n <= holdDays) return null;
+            if (mode === 'twr') {
+                let wins = 0, sum = 0, cnt = 0;
+                for (let i = 0; i + holdDays < n; i++) {
+                    const ret = nv[i + holdDays] / nv[i] - 1;
+                    if (isFinite(ret)) { sum += ret; cnt++; if (ret > 0) wins++; }
+                }
+                if (cnt === 0) return null;
+                const avgReturn = sum / cnt;
+                // 时间加权年化：(1+平均持有收益)^(252/holdDays) - 1
+                const avgAnnual = Math.pow(1 + avgReturn, 252 / holdDays) - 1;
+                return { winRate: wins / cnt * 100, avgReturn: avgReturn * 100, avgAnnual: avgAnnual * 100, samples: cnt, annualSamples: cnt };
+            }
+            // 定投模拟口径
+            const startIdx = backtestResult.simStartIdx || 0;
+            let wins = 0, sum = 0, sumAnnual = 0, cnt = 0, annualCnt = 0;
+            for (let i = 0; i + holdDays < n; i++) {
+                const w = simulateDcaWindow(startIdx + i, startIdx + i + holdDays);
+                if (!w) continue;
+                sum += w.holdingReturn; cnt++;
+                if (w.holdingReturn > 0) wins++;
+                if (isFinite(w.xirrAnnual)) { sumAnnual += w.xirrAnnual; annualCnt++; }
+            }
+            if (cnt === 0) return null;
+            return {
+                winRate: wins / cnt * 100,
+                avgReturn: sum / cnt * 100,
+                avgAnnual: annualCnt > 0 ? sumAnnual / annualCnt * 100 : NaN,
+                samples: cnt,
+                annualSamples: annualCnt
+            };
+        }
+
+        function setProfitMode(mode) {
+            if (mode !== 'dca' && mode !== 'twr') return;
+            profitMode = mode;
+            document.getElementById('ppModeDca').className = 'px-3 py-1.5 text-sm ' + (mode === 'dca' ? 'bg-blue-600 text-white' : 'bg-white text-gray-700 hover:bg-gray-100');
+            document.getElementById('ppModeTwr').className = 'px-3 py-1.5 text-sm ' + (mode === 'twr' ? 'bg-blue-600 text-white' : 'bg-white text-gray-700 hover:bg-gray-100');
+            renderProfitProbability();
+        }
+
+        // 批量计算盈利概率（异步分块 + 进度），彻底避免切换口径时主线程阻塞
+        // periods: [{label, days}]，mode: 'dca'（定投模拟）| 'twr'（组合净值）
+        // 返回 results: { [days]: {winRate, avgReturn, avgAnnual, samples, annualSamples} | null }
+        let ppComputeToken = 0;
+        function computeProfitProbabilityAsync(periods, mode, onProgress, onDone) {
+            mode = mode || 'dca';
+            const nv = backtestResult.netValues || [];
+            const n = nv.length;
+            const result = {};
+            periods.forEach(p => { result[p.days] = null; });
+            const validPeriods = periods.filter(p => n > p.days);
+            if (validPeriods.length === 0) { onDone(result); return; }
+
+            // 时间加权（组合净值）口径：O(n) 极快，同步即可
+            if (mode === 'twr') {
+                validPeriods.forEach(p => {
+                    const holdDays = p.days;
+                    let wins = 0, sum = 0, cnt = 0;
+                    for (let i = 0; i + holdDays < n; i++) {
+                        const ret = nv[i + holdDays] / nv[i] - 1;
+                        if (isFinite(ret)) { sum += ret; cnt++; if (ret > 0) wins++; }
+                    }
+                    if (cnt > 0) {
+                        const avgReturn = sum / cnt;
+                        result[p.days] = {
+                            winRate: wins / cnt * 100,
+                            avgReturn: avgReturn * 100,
+                            avgAnnual: (Math.pow(1 + avgReturn, 252 / holdDays) - 1) * 100,
+                            samples: cnt, annualSamples: cnt
+                        };
+                    }
+                });
+                onDone(result);
+                return;
+            }
+
+            // 定投模拟（资金加权）口径：
+            // 关键优化——对每个历史起点只重放一次（覆盖全部持有期），避免不同持有期重复重放（优化项 2）；
+            // 内层使用预缓存时间戳与日份数组，不再 new Date（优化项 1）；分块异步执行并显示进度（优化项 4）。
+            const simNav = backtestResult.simNav, simDiv = backtestResult.simDiv;
+            const simDow = backtestResult.simDow, simDateTs = backtestResult.simDateTs, simDay = backtestResult.simDayOfMonth;
+            const startIdx = backtestResult.simStartIdx || 0;
+            if (!simNav || !simDateTs) { onDone(result); return; }
+            const simLen = startIdx + n; // 等于 allDateStrs.length
+            const maxHold = Math.max.apply(null, validPeriods.map(p => p.days));
+            const minHold = Math.min.apply(null, validPeriods.map(p => p.days));
+            const offsets = validPeriods.map(p => p.days).sort((a, b) => a - b);
+            const acc = {};
+            validPeriods.forEach(p => { acc[p.days] = { wins: 0, sum: 0, sumAnnual: 0, cnt: 0, annualCnt: 0 }; });
+
+            const limit = n - minHold; // 起点循环上界（不含）
+            let i = 0;
+            const BATCH = 150;
+
+            function processStart(S) {
+                const shares = {};
+                for (const plan of investmentPlans) { if (simNav[plan.fund]) shares[plan.fund] = 0; }
+                let totalCash = 0, invested = 0;
+                const cashFlows = [], flowDates = [];
+                const baseK = startIdx + S;
+                const Ek = Math.min(baseK + maxHold, simLen - 1);
+                let offIdx = 0;
+                for (let k = baseK; k <= Ek; k++) {
+                    const dOff = k - baseK;
+                    const dow = simDow[k];
+                    const day = simDay[k];
+                    for (const plan of investmentPlans) {
+                        const fund = plan.fund, navArr = simNav[fund];
+                        if (!navArr) continue;
+                        const nav = navArr[k];
+                        if (nav === null || nav === undefined) continue;
+                        const divArr = simDiv[fund];
+                        if (shares[fund] > 0) {
+                            const divPerShare = divArr ? (divArr[k] || 0) : 0;
+                            if (divPerShare > 0) {
+                                const totalDiv = shares[fund] * divPerShare;
+                                if (plan.div === 'reinvest') shares[fund] += totalDiv / nav;
+                                else { totalCash += totalDiv; cashFlows.push(totalDiv); flowDates.push(simDateTs[k]); }
+                            }
+                        }
+                        let shouldInvest = false;
+                        if (plan.type === 'single') { if (k === baseK) shouldInvest = true; }
+                        else if (plan.type === 'weekly') { if (k >= baseK && dow === 1) shouldInvest = true; }
+                        else if (plan.type === 'monthly') { if (k >= baseK && day === 1) shouldInvest = true; }
+                        if (shouldInvest) {
+                            shares[fund] += plan.amount / nav;
+                            invested += plan.amount;
+                            cashFlows.push(-plan.amount);
+                            flowDates.push(simDateTs[k]);
+                        }
+                    }
+                    while (offIdx < offsets.length && dOff >= offsets[offIdx]) {
+                        const off = offsets[offIdx];
+                        let mv = 0;
+                        for (const fund of Object.keys(shares)) {
+                            const endNav = simNav[fund][k];
+                            if (endNav !== null && endNav !== undefined) mv += shares[fund] * endNav;
+                        }
+                        mv += totalCash;
+                        if (invested > 0) {
+                            const holdingReturn = mv / invested - 1;
+                            if (isFinite(holdingReturn)) {
+                                const a = acc[off];
+                                a.sum += holdingReturn; a.cnt++;
+                                if (holdingReturn > 0) a.wins++;
+                                cashFlows.push(mv); flowDates.push(simDateTs[k]);
+                                const x = xirr(cashFlows, flowDates);
+                                cashFlows.pop(); flowDates.pop();
+                                if (isFinite(x)) { a.sumAnnual += x; a.annualCnt++; }
+                            }
+                        }
+                        offIdx++;
+                    }
+                }
+            }
+
+            function step() {
+                const end = Math.min(i + BATCH, limit);
+                for (; i < end; i++) processStart(i);
+                if (onProgress) onProgress(limit > 0 ? i / limit : 1);
+                if (i < limit) setTimeout(step, 0);
+                else {
+                    validPeriods.forEach(p => {
+                        const a = acc[p.days];
+                        if (a.cnt > 0) {
+                            result[p.days] = {
+                                winRate: a.wins / a.cnt * 100,
+                                avgReturn: a.sum / a.cnt * 100,
+                                avgAnnual: a.annualCnt > 0 ? a.sumAnnual / a.annualCnt * 100 : NaN,
+                                samples: a.cnt, annualSamples: a.annualCnt
+                            };
+                        }
+                    });
+                    onDone(result);
+                }
+            }
+            step();
+        }
+
+        function renderProfitProbability() {
+            const sec = document.getElementById('profitProbabilitySection');
+            const tbl = document.getElementById('profitProbabilityTable');
+            const nv = backtestResult.netValues || [];
+            if (!nv || nv.length === 0) { sec.style.display = 'none'; return; }
+            const basePeriods = [
+                { label: '满6月', days: 126 },
+                { label: '满1年', days: 252 },
+                { label: '满2年', days: 504 },
+                { label: '满3年', days: 756 }
+            ];
+            const custom = customPeriods.map(y => ({ label: y + '年', days: Math.max(1, Math.round(y * 252)) }));
+            const all = basePeriods.concat(custom);
+
+            // 先显示加载态（含进度），再异步计算，避免同步计算冻结 UI（优化项 4）
+            const token = ++ppComputeToken;
+            tbl.innerHTML = '<div class="p-8 text-center text-gray-500">盈利概率计算中… <span id="ppProg" class="font-medium text-blue-600"></span></div>';
+            sec.style.display = 'block';
+
+            computeProfitProbabilityAsync(all, profitMode, (prog) => {
+                if (token !== ppComputeToken) return;
+                const el = document.getElementById('ppProg');
+                if (el) el.textContent = Math.round(prog * 100) + '%';
+            }, (results) => {
+                if (token !== ppComputeToken) return; // 已有更新的计算，丢弃旧结果
+                let rows = '', any = false;
+                all.forEach(p => {
+                    const r = results[p.days];
+                    if (!r) {
+                        rows += `<tr><td class="px-4 py-3 border-b font-medium">${p.label}</td><td class="px-4 py-3 border-b text-center text-gray-400" colspan="3">数据不足</td></tr>`;
+                        return;
+                    }
+                    any = true;
+                    const retColor = r.avgReturn >= 0 ? 'text-red-600 font-semibold' : 'text-green-600 font-semibold';
+                    const retSign = r.avgReturn >= 0 ? '+' : '';
+                    const annColor = (!isFinite(r.avgAnnual)) ? 'text-gray-400'
+                        : (r.avgAnnual >= 0 ? 'text-red-600 font-semibold' : 'text-green-600 font-semibold');
+                    const annText = isFinite(r.avgAnnual) ? (r.avgAnnual >= 0 ? '+' : '') + r.avgAnnual.toFixed(2) + '%' : '—';
+                    const annNote = (!isFinite(r.avgAnnual) && r.annualSamples === 0) ? ' <span class="text-xs text-gray-400">(年化数据不足)</span>' : '';
+                    const wr = r.winRate;
+                    rows += `<tr>
+                        <td class="px-4 py-3 border-b font-medium text-center whitespace-nowrap">${p.label}</td>
+                        <td class="px-4 py-3 border-b text-center whitespace-nowrap ${retColor}">${retSign}${r.avgReturn.toFixed(2)}%</td>
+                        <td class="px-4 py-3 border-b text-center whitespace-nowrap ${annColor}">${annText}${annNote}</td>
+                        <td class="px-4 py-3 border-b">
+                            <div class="flex items-center gap-2">
+                                <div class="flex-1 bg-gray-100 rounded-full h-3 overflow-hidden">
+                                    <div class="h-3 rounded-full" style="width:${wr.toFixed(1)}%;background:linear-gradient(90deg,#3b82f6,#2563eb);"></div>
+                                </div>
+                                <span class="text-sm font-semibold text-blue-700 w-14 text-right">${wr.toFixed(1)}%</span>
+                            </div>
+                            <div class="text-xs text-gray-400 mt-1">样本数 ${r.samples}</div>
+                        </td>
+                    </tr>`;
+                });
+                if (!any) { sec.style.display = 'none'; return; }
+                const modeLabel = profitMode === 'dca' ? '定投模拟（资金加权，按计划规则在历史任意时点起投）' : '组合净值（一次性买入，时间加权）';
+                const ppDefaultWidths = ['14%', '14%', '16%'];
+                const ppHeaders = ['持有时长', '平均收益', '年化收益率'];
+                let ppHeadHtml = '';
+                ppHeaders.forEach((h, i) => {
+                    const w = colWidths[i] ? colWidths[i] + 'px' : ppDefaultWidths[i];
+                    ppHeadHtml += `<th class="px-4 py-2 border-b text-center whitespace-nowrap" style="width:${w}">${h}</th>`;
+                });
+                ppHeadHtml += '<th class="px-4 py-2 border-b text-center">盈利概率</th>';
+                tbl.innerHTML = '<table class="min-w-full bg-white border border-gray-200 rounded-lg text-sm" style="table-layout:fixed;width:100%"><thead class="bg-gray-100"><tr>' +
+                    ppHeadHtml + '</tr></thead><tbody>' +
+                    rows + '</tbody></table>' +
+                    `<p class="text-xs text-gray-400 mt-3">当前口径：${modeLabel}。盈利概率、平均收益与年化收益率均为历史业绩数据测算，不代表未来收益。</p>`;
+                enableColumnResize(tbl.querySelector('table'));
+                sec.style.display = 'block';
+            });
+        }
+
+        // 前三列手动拖拽调宽（拖表头右边界）。colWidths 为 null 时用默认百分比，否则用已保存的像素宽。
+        let colWidths = [null, null, null];
+        function enableColumnResize(table) {
+            if (!table) return;
+            const ths = table.querySelectorAll('thead th');
+            ths.forEach((th, idx) => {
+                if (idx >= 3) return; // 仅前三列可拖拽
+                th.style.position = 'relative';
+                let handle = th.querySelector('.col-resize-handle');
+                if (!handle) {
+                    handle = document.createElement('span');
+                    handle.className = 'col-resize-handle';
+                    handle.style.cssText = 'position:absolute;right:0;top:0;height:100%;width:7px;cursor:col-resize;user-select:none;z-index:5;';
+                    th.appendChild(handle);
+                }
+                handle.onmousedown = function (e) {
+                    e.preventDefault();
+                    e.stopPropagation();
+                    const startX = e.clientX;
+                    const startW = th.offsetWidth;
+                    th.style.width = startW + 'px'; // 锁定为像素，便于平滑拖拽
+                    document.body.style.cursor = 'col-resize';
+                    document.body.style.userSelect = 'none';
+                    function onMove(ev) {
+                        const newW = Math.max(48, startW + (ev.clientX - startX));
+                        th.style.width = newW + 'px';
+                    }
+                    function onUp() {
+                        document.removeEventListener('mousemove', onMove);
+                        document.removeEventListener('mouseup', onUp);
+                        document.body.style.cursor = '';
+                        document.body.style.userSelect = '';
+                        colWidths[idx] = th.offsetWidth; // 记存，重算后保持
+                    }
+                    document.addEventListener('mousemove', onMove);
+                    document.addEventListener('mouseup', onUp);
+                };
+            });
+        }
+
+        function addCustomPeriod() {
+            const v = parseFloat(document.getElementById('customHoldYears').value);
+            if (!(v > 0)) { alert('请输入大于 0 的持有年数'); return; }
+            if (!customPeriods.includes(v)) customPeriods.push(v);
+            renderProfitProbability();
+        }
+        function clearCustomPeriods() {
+            customPeriods = [];
+            renderProfitProbability();
+        }
+
+        // 基金简称截断（超长加省略号，全称通过 title 显示）
+        function shortName(name, max) {
+            max = max || 8;
+            if (!name) return '';
+            return name.length > max ? name.slice(0, max) + '…' : name;
+        }
+
+        // 相关系数 -> 颜色（正相关红系、负相关绿系、0 附近白）
+        function corrColor(c) {
+            if (c >= 0) {
+                const t = c;
+                const r = Math.round(255 - t * 39);
+                const g = Math.round(255 - t * 207);
+                const b = Math.round(255 - t * 216);
+                return { bg: `rgb(${r},${g},${b})`, fg: t > 0.55 ? '#fff' : '#333' };
+            } else {
+                const t = -c;
+                const r = Math.round(255 - t * 229);
+                const g = Math.round(255 - t * 103);
+                const b = Math.round(255 - t * 175);
+                return { bg: `rgb(${r},${g},${b})`, fg: t > 0.55 ? '#fff' : '#333' };
+            }
+        }
+
+        function pearson(a, b) {
+            const n = a.length;
+            let sa = 0, sb = 0;
+            for (let i = 0; i < n; i++) { sa += a[i]; sb += b[i]; }
+            const ma = sa / n, mb = sb / n;
+            let cov = 0, va = 0, vb = 0;
+            for (let i = 0; i < n; i++) {
+                const da = a[i] - ma, db = b[i] - mb;
+                cov += da * db; va += da * da; vb += db * db;
+            }
+            if (va === 0 || vb === 0) return NaN;
+            return cov / Math.sqrt(va * vb);
+        }
+
+        function renderCorrelationMatrix() {
+            const sec = document.getElementById('correlationSection');
+            const tbl = document.getElementById('correlationTable');
+            const legend = document.getElementById('correlationLegend');
+            const codes = [...new Set(investmentPlans.map(p => p.fund))];
+            if (codes.length === 0) { sec.style.display = 'none'; return; }
+
+            // 每只基金：日期 -> 日收益率
+            const retMaps = {};
+            codes.forEach(code => {
+                const f = fundsData[code];
+                if (!f) return;
+                const m = new Map();
+                for (let i = 1; i < f.dates.length; i++) {
+                    const nav0 = f.nav[i - 1], nav1 = f.nav[i];
+                    if (nav0 > 0 && nav1 > 0) m.set(formatDate(f.dates[i]), nav1 / nav0 - 1);
+                }
+                retMaps[code] = m;
+            });
+
+            // 共同交易日交集
+            let common = null;
+            codes.forEach(code => {
+                const m = retMaps[code];
+                if (!m) return;
+                const keys = new Set(m.keys());
+                common = common === null ? keys : new Set([...common].filter(k => keys.has(k)));
+            });
+            if (!common || common.size < 3) { sec.style.display = 'none'; return; }
+
+            const commonArr = Array.from(common).sort();
+            const series = {};
+            codes.forEach(code => {
+                const m = retMaps[code];
+                series[code] = commonArr.map(d => m.get(d));
+            });
+
+            const circle = ['①', '②', '③', '④', '⑤', '⑥', '⑦', '⑧', '⑨', '⑩'];
+            const labels = codes.map(code => fundCodeName(code));
+
+            let headerCells = '<th class="px-3 py-2 border-b text-center"></th>' +
+                codes.map((code, i) => `<th class="px-3 py-2 border-b text-center" title="${labels[i].name}">${circle[i] || (i + 1)}<div class="text-xs font-normal text-gray-500">${shortName(labels[i].name)}</div></th>`).join('');
+
+            let body = '';
+            codes.forEach((codeA, i) => {
+                let cells = `<td class="px-3 py-2 border-b text-center font-medium" title="${labels[i].name}">${circle[i] || (i + 1)} <span class="text-xs text-gray-500">${shortName(labels[i].name)}</span></td>`;
+                codes.forEach((codeB, j) => {
+                    const c = (i === j) ? 1 : pearson(series[codeA], series[codeB]);
+                    if (isNaN(c)) { cells += '<td class="px-3 py-2 border-b text-center text-gray-400">-</td>'; return; }
+                    const col = corrColor(c);
+                    const txt = (c >= 0 ? '+' : '') + c.toFixed(2);
+                    cells += `<td class="px-3 py-2 border-b text-center font-medium" style="background:${col.bg};color:${col.fg};">${txt}</td>`;
+                });
+                body += `<tr>${cells}</tr>`;
+            });
+
+            tbl.innerHTML = '<table class="min-w-full bg-white border border-gray-200 rounded-lg text-sm"><thead class="bg-gray-100"><tr>' +
+                headerCells + '</tr></thead><tbody>' + body + '</tbody></table>';
+            legend.innerHTML = '<div class="flex items-center gap-3"><span class="text-sm font-medium text-gray-600">+1.00</span>' +
+                '<div class="flex-1 h-4 rounded" style="background:linear-gradient(90deg, rgb(216,48,39), #ffffff, rgb(26,152,80));"></div>' +
+                '<span class="text-sm font-medium text-gray-600">-1.00</span></div>' +
+                '<div class="text-xs text-gray-400 mt-1">颜色越红代表正相关越强，越绿代表负相关越强。</div>';
+            sec.style.display = 'block';
         }
 
         // 更新图表（基准对齐至组合起点）
@@ -1228,29 +1764,96 @@
                     }
                 }
                 riskHtml = `
-                    <div class="bg-red-50 p-4 rounded-lg text-center"><div class="text-sm text-gray-600">最大回撤</div><div class="text-2xl font-bold text-red-700">${maxDrawdown.toFixed(2)}%</div></div>
-                    <div class="bg-rose-50 p-4 rounded-lg text-center"><div class="text-sm text-gray-600">回撤持续天数</div><div class="text-2xl font-bold text-rose-700">${maxSpan.toFixed(0)} 天</div></div>
-                    <div class="bg-orange-50 p-4 rounded-lg text-center"><div class="text-sm text-gray-600">年化波动率</div><div class="text-2xl font-bold text-orange-700">${(annualVolatility * 100).toFixed(2)}%</div></div>
-                    <div class="bg-teal-50 p-4 rounded-lg text-center"><div class="text-sm text-gray-600">夏普/卡玛</div><div class="text-2xl font-bold text-teal-700">${isNaN(sharpeRatio) ? '-' : sharpeRatio.toFixed(2)}/${isNaN(calmarRatio) ? '-' : calmarRatio.toFixed(2)}</div></div>
+                    <div class="bg-red-50 p-4 rounded-lg text-center" data-mkey="最大回撤"><div class="text-sm text-slate-500">最大回撤</div><div class="text-2xl font-bold text-red-700">${maxDrawdown.toFixed(2)}%</div></div>
+                    <div class="bg-red-50 p-4 rounded-lg text-center" data-mkey="回撤持续天数"><div class="text-sm text-slate-500">回撤持续天数</div><div class="text-2xl font-bold text-red-700">${maxSpan.toFixed(0)} 天</div></div>
+                    <div class="bg-red-50 p-4 rounded-lg text-center" data-mkey="年化波动率"><div class="text-sm text-slate-500">年化波动率</div><div class="text-2xl font-bold text-red-700">${(annualVolatility * 100).toFixed(2)}%</div></div>
+                    <div class="bg-red-50 p-4 rounded-lg text-center" data-mkey="夏普/卡玛"><div class="text-sm text-slate-500">夏普/卡玛</div><div class="text-2xl font-bold text-red-700">${isNaN(sharpeRatio) ? '-' : sharpeRatio.toFixed(2)}/${isNaN(calmarRatio) ? '-' : calmarRatio.toFixed(2)}</div></div>
                 `;
             } else {
-                riskHtml = `<div class="bg-gray-100 p-4 rounded-lg text-center col-span-4"><div class="text-sm text-gray-600">风险指标</div><div class="text-xl font-medium text-gray-500">区间交易日不足${MIN_TRADE_DAYS}个，以下指标暂不可用</div></div>`;
+                riskHtml = `<div class="bg-gray-100 p-4 rounded-lg text-center col-span-4" data-mkey="风险指标"><div class="text-sm text-gray-600">风险指标</div><div class="text-xl font-medium text-gray-500">区间交易日不足${MIN_TRADE_DAYS}个，以下指标暂不可用</div></div>`;
             }
 
             el.innerHTML = `
-                <div class="bg-blue-50 p-4 rounded-lg text-center"><div class="text-sm text-gray-600">区间投入本金</div><div class="text-2xl font-bold text-blue-700">${intervalPrincipal.toFixed(2)} 元</div></div>
-                <div class="bg-green-50 p-4 rounded-lg text-center"><div class="text-sm text-gray-600">区间期末市值</div><div class="text-2xl font-bold text-green-700">${mvEnd.toFixed(2)} 元</div></div>
-                <div class="bg-yellow-50 p-4 rounded-lg text-center"><div class="text-sm text-gray-600">区间现金分红</div><div class="text-2xl font-bold text-yellow-700">${cashDivInterval.toFixed(2)} 元</div></div>
-                <div class="bg-purple-50 p-4 rounded-lg text-center"><div class="text-sm text-gray-600">区间期末总资产</div><div class="text-2xl font-bold text-purple-700">${totalAssetEnd.toFixed(2)} 元</div></div>
+                <div class="bg-sky-50 p-4 rounded-lg text-center" data-mkey="区间投入本金"><div class="text-sm text-slate-500">区间投入本金</div><div class="text-2xl font-bold text-sky-700">${intervalPrincipal.toFixed(2)} 元</div></div>
+                <div class="bg-sky-50 p-4 rounded-lg text-center" data-mkey="区间期末市值"><div class="text-sm text-slate-500">区间期末市值</div><div class="text-2xl font-bold text-sky-700">${mvEnd.toFixed(2)} 元</div></div>
+                <div class="bg-sky-50 p-4 rounded-lg text-center" data-mkey="区间现金分红"><div class="text-sm text-slate-500">区间现金分红</div><div class="text-2xl font-bold text-sky-700">${cashDivInterval.toFixed(2)} 元</div></div>
+                <div class="bg-sky-50 p-4 rounded-lg text-center" data-mkey="区间期末总资产"><div class="text-sm text-slate-500">区间期末总资产</div><div class="text-2xl font-bold text-sky-700">${totalAssetEnd.toFixed(2)} 元</div></div>
 
-                <div class="bg-indigo-50 p-4 rounded-lg text-center"><div class="text-sm text-gray-600">区间累计收益率</div><div class="text-2xl font-bold text-indigo-700">${cumHtml}</div></div>
-                <div class="bg-pink-50 p-4 rounded-lg text-center"><div class="text-sm text-gray-600">区间XIRR年化</div><div class="text-2xl font-bold text-pink-700">${isNaN(xirrValInterval) ? '-' : xirrValInterval.toFixed(2) + '%'}</div></div>
-                <div class="bg-cyan-50 p-4 rounded-lg text-center"><div class="text-sm text-gray-600">区间年化收益率(时间加权)</div><div class="text-2xl font-bold text-cyan-700">${twrHtml}</div></div>
-                <div class="bg-emerald-50 p-4 rounded-lg text-center"><div class="text-sm text-gray-600">区间胜率(正收益日占比)</div><div class="text-2xl font-bold text-emerald-700">${winHtml}</div></div>
+                <div class="bg-green-50 p-4 rounded-lg text-center" data-mkey="区间累计收益率"><div class="text-sm text-slate-500">区间累计收益率</div><div class="text-2xl font-bold text-green-700">${cumHtml}</div></div>
+                <div class="bg-green-50 p-4 rounded-lg text-center" data-mkey="区间XIRR年化"><div class="text-sm text-slate-500">区间XIRR年化</div><div class="text-2xl font-bold text-green-700">${isNaN(xirrValInterval) ? '-' : xirrValInterval.toFixed(2) + '%'}</div></div>
+                <div class="bg-green-50 p-4 rounded-lg text-center" data-mkey="区间年化收益率(时间加权)"><div class="text-sm text-slate-500">区间年化收益率(时间加权)</div><div class="text-2xl font-bold text-green-700">${twrHtml}</div></div>
+                <div class="bg-green-50 p-4 rounded-lg text-center" data-mkey="区间胜率(正收益日占比)"><div class="text-sm text-slate-500">区间胜率(正收益日占比)</div><div class="text-2xl font-bold text-green-700">${winHtml}</div></div>
 
                 ${riskHtml}
             `;
             if (labelEl) labelEl.textContent = `（${startStr} ~ ${endStr}，共 ${n} 个交易日）`;
+        }
+
+        // ============ 指标卡悬停解释 ============
+        const METRIC_TIPS = {
+            "总投入本金": "回测区间内实际投入的所有资金（定投扣款+一次性买入），不含分红再投。即你的成本基数。",
+            "持仓市值": "期末仍持有的份额 × 最新净值，不含已到手现金分红。",
+            "累计现金分红": "累计收到的、未再投的现金分红；红利再投模式下为 0。",
+            "总资产": "持仓市值 + 累计现金分红，即组合上的全部家当。",
+            "累计收益率": "资金加权口径：(总资产 ÷ 本金 − 1)。<br>正数代表整体实际赚钱。",
+            "XIRR年化": "把每笔投入/分红/市值都当作现金流，算考虑时间权重的年化内部收益率。<br>早投的钱权重更高，比累计收益率更公平。",
+            "年化收益率(时间加权)": "把组合净值序列年化（剔除你的投入节奏），反映“组合本身”的赚钱能力。",
+            "胜率(正收益日占比)": "上涨交易日数 ÷ 总交易日数，越高说明日子大多在涨。",
+            "最大回撤": "净值从最高点到最低点的最大跌幅(%)，越大代表最坏情况越惨。",
+            "回撤持续天数": "最长一次从顶部跌下、再回到新高所经历的天数，越久越磨人。",
+            "年化波动率": "日收益波动 × √252，衡量价格颠簸程度，越大越刺激。",
+            "夏普/卡玛": "夏普=(年化收益−无风险利率)÷波动率；<br>卡玛=年化收益÷最大回撤。<br>两个都是越高越好。",
+            "区间投入本金": "选定图表区间内实际投入的资金（定投+一次性买入），不含分红再投。",
+            "区间期末市值": "区间期末仍持有的份额 × 区间末净值，不含已到手现金分红。",
+            "区间现金分红": "该区间内新收到的、未再投的现金分红。",
+            "区间期末总资产": "区间期末市值 + 区间内累计现金分红。",
+            "区间累计收益率": "时间加权口径：区间末净值 ÷ 区间初净值 − 1。<br>注意与上方“累计收益率”(资金加权)口径不同，不要直接横比。",
+            "区间XIRR年化": "把区间内每笔投入/分红/期末资产当作现金流，算考虑时间权重的年化收益。",
+            "区间年化收益率(时间加权)": "把区间净值序列年化（剔除投入节奏），反映区间窗口内组合本身的赚钱能力。",
+            "区间胜率(正收益日占比)": "该区间内上涨交易日数 ÷ 区间交易日数。",
+            "风险指标": "本金/市值类指标不在此列，这里只解释下方的回撤、波动率等风险项。"
+        };
+
+        function initMetricTooltip() {
+            // 注入浮层样式
+            const style = document.createElement('style');
+            style.textContent = `
+            #metricTip{position:fixed;z-index:9999;max-width:300px;background:#1f2937;color:#f3f4f6;
+            font-size:12px;line-height:1.6;padding:8px 11px;border-radius:8px;pointer-events:none;
+            box-shadow:0 6px 20px rgba(0,0,0,.28);display:none;white-space:normal;}
+            #metricTip b{color:#fbbf24;}`;
+            document.head.appendChild(style);
+
+            const tip = document.createElement('div');
+            tip.id = 'metricTip';
+            document.body.appendChild(tip);
+
+            ['metrics', 'periodMetrics'].forEach(id => {
+                const box = document.getElementById(id);
+                if (!box) return;
+                box.addEventListener('mouseover', e => {
+                    const cell = e.target.closest('[data-mkey]');
+                    if (!cell) { tip.style.display = 'none'; return; }
+                    const key = cell.dataset.mkey;
+                    const txt = METRIC_TIPS[key];
+                    if (!txt) { tip.style.display = 'none'; return; }
+                    tip.innerHTML = '<b>' + key + '</b><br>' + txt;
+                    tip.style.display = 'block';
+                });
+                box.addEventListener('mousemove', e => {
+                    if (tip.style.display === 'block') {
+                        let x = e.clientX + 14, y = e.clientY + 14;
+                        const r = tip.getBoundingClientRect();
+                        if (x + r.width > window.innerWidth) x = e.clientX - r.width - 14;
+                        if (y + r.height > window.innerHeight) y = e.clientY - r.height - 14;
+                        tip.style.left = x + 'px';
+                        tip.style.top = y + 'px';
+                    }
+                });
+                box.addEventListener('mouseout', e => {
+                    if (!e.relatedTarget || !e.relatedTarget.closest('[data-mkey]')) tip.style.display = 'none';
+                });
+            });
         }
 
         // 绑定事件（放在页面加载完成后）
@@ -1259,6 +1862,7 @@
             if (clearBtn) {
                 clearBtn.addEventListener('click', clearAllBenchmarks);
             }
+            initMetricTooltip();
         });
 
         // 渲染关键节点分析表格（修正版：四个固定节点）
@@ -1949,6 +2553,22 @@
             const benchmarksAll = await db.benchmarks.toArray();
             const benchmarksData = benchmarksAll.map(function (b) { return { id: b.id, name: b.name, data: b.data }; });
             const metricsHtml = document.getElementById('metrics').innerHTML;
+
+            // 盈利概率 / 相关性分析（抓取当前已渲染的表格快照）
+            const ppTableHtml = document.getElementById('profitProbabilityTable') ? document.getElementById('profitProbabilityTable').innerHTML : '';
+            const ppVisible = document.getElementById('profitProbabilitySection') && document.getElementById('profitProbabilitySection').style.display !== 'none' && ppTableHtml.trim() !== '';
+            const corrTableHtml = document.getElementById('correlationTable') ? document.getElementById('correlationTable').innerHTML : '';
+            const corrLegendHtml = document.getElementById('correlationLegend') ? document.getElementById('correlationLegend').innerHTML : '';
+            const corrVisible = document.getElementById('correlationSection') && document.getElementById('correlationSection').style.display !== 'none' && corrTableHtml.trim() !== '';
+            const ppDesc = profitMode === 'dca'
+                ? '以历史任意时点为起点、按投资计划规则进行定投模拟，持有满对应时长后的盈利概率、平均持有收益与年化收益率（资金加权；持有期以交易日近似，1 自然年 ≈ 252 交易日）。'
+                : '历史任意时点一次性买入并持有满对应时长后的盈利概率、平均收益与年化收益率（时间加权净值口径；持有期以交易日近似，1 自然年 ≈ 252 交易日）。';
+            const ppSectionHtml = ppVisible
+                ? ('<div class="bg-white p-6 rounded-xl shadow-md mb-6"><h2 class="text-xl font-semibold mb-4 text-gray-700">盈利概率</h2><p class="text-sm text-gray-500 mb-4">' + ppDesc + '</p>' + ppTableHtml + '<p class="text-xs text-gray-400 mt-3">盈利概率为历史业绩数据测算，不代表未来收益。</p></div>')
+                : '';
+            const corrSectionHtml = corrVisible
+                ? ('<div class="bg-white p-6 rounded-xl shadow-md mb-6"><h2 class="text-xl font-semibold mb-4 text-gray-700">相关性分析</h2><p class="text-sm text-gray-500 mb-4">投资计划中各基金日收益率（以交易日对齐）的皮尔逊相关系数矩阵。</p>' + corrTableHtml + corrLegendHtml + '<p class="text-xs text-gray-400 mt-3">本页面展示收益相关数据仅为历史数据测算，不构成收益保证或预示其未来表现。</p></div>')
+                : '';
             const startD = formatDate(backtestResult.dates[0]);
             const endD = formatDate(backtestResult.dates[backtestResult.dates.length - 1]);
             const data = { reportData: reportData, benchmarksData: benchmarksData, currentBenchmarkId: currentBenchmarkId };
@@ -2020,6 +2640,8 @@
                 '            <h2 class="text-xl font-semibold mb-4 text-gray-700">回测指标</h2>\n' +
                 '            <div id="metrics" class="grid grid-cols-2 md:grid-cols-4 gap-4">' + metricsHtml + '</div>\n' +
                 '        </div>\n' +
+                (ppSectionHtml ? '        ' + ppSectionHtml.split('\n').join('\n        ') + '\n' : '') +
+                (corrSectionHtml ? '        ' + corrSectionHtml.split('\n').join('\n        ') + '\n' : '') +
                 '        <div class="bg-white p-6 rounded-xl shadow-md mb-6">\n' +
                 '            <h2 class="text-xl font-semibold mb-4 text-gray-700">投资计划概览</h2>\n' +
                 planTableHtml + '\n' +
