@@ -3,7 +3,7 @@
 <head>
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
-    <title>基金组合回测工具 v20260711.1111</title>
+    <title>基金组合回测工具 v20260712.1500</title>
     <!-- 依赖库 -->
     <script src="https://cdn.sheetjs.com/xlsx-0.20.1/package/dist/xlsx.full.min.js"></script>
     <script src="https://cdn.jsdelivr.net/npm/chart.js@4.4.1/dist/chart.umd.min.js"></script>
@@ -23,10 +23,10 @@
             <!-- 项目与报告工具栏 -->
             <div class="flex flex-wrap items-center gap-3 mb-4 p-3 bg-blue-50 rounded-lg border border-blue-200">
                 <span class="text-sm font-medium text-blue-700">项目与报告：</span>
-                <button id="exportProjectBtn" class="bg-blue-600 text-white px-4 py-2 rounded-lg hover:bg-blue-700 transition text-sm font-medium">⬇️ 导出项目</button>
-                <button id="importProjectBtn" class="bg-indigo-600 text-white px-4 py-2 rounded-lg hover:bg-indigo-700 transition text-sm font-medium">⬆️ 导入项目</button>
+                <button id="importProjectBtn" class="bg-indigo-600 text-white px-4 py-2 rounded-lg hover:bg-indigo-700 transition text-sm font-medium">⬇️导入项目</button>
+                <button id="exportProjectBtn" class="bg-blue-600 text-white px-4 py-2 rounded-lg hover:bg-blue-700 transition text-sm font-medium">⬆️导出项目</button>
                 <input type="file" id="importProjectFile" accept=".json" class="hidden">
-                <button id="reportHtmlBtn" class="bg-emerald-600 text-white px-4 py-2 rounded-lg hover:bg-emerald-700 transition text-sm font-medium">📄 导出报告(HTML)</button>
+                <button id="reportHtmlBtn" class="bg-emerald-600 text-white px-4 py-2 rounded-lg hover:bg-emerald-700 transition text-sm font-medium">📄导出报告(HTML)</button>
                 <span class="text-xs text-gray-500">导出项目含全部基准，可一键还原并自动回测</span>
             </div>
             <div class="grid grid-cols-1 md:grid-cols-2 gap-6">
@@ -150,7 +150,11 @@
 
             <!-- 盈利概率 -->
             <div id="profitProbabilitySection" class="bg-white p-6 rounded-xl shadow-md mb-6" style="display:none;">
-                <h3 class="text-lg font-semibold mb-3 text-gray-700">盈利概率</h3>
+                <div class="flex items-center justify-between mb-3">
+                    <h3 class="text-lg font-semibold text-gray-700">盈利概率</h3>
+                    <button id="toggleProfitProbBtn" class="text-sm text-gray-500 hover:text-gray-700 px-2 py-1 rounded border">▼ 展开</button>
+                </div>
+                <div id="profitProbCollapsible" class="hidden">
                 <div class="flex flex-wrap items-center gap-3 mb-3">
                     <span class="text-sm font-medium text-gray-700">测算口径：</span>
                     <div class="inline-flex rounded-lg border border-gray-300 overflow-hidden">
@@ -167,15 +171,21 @@
                     <button onclick="clearCustomPeriods()" class="bg-gray-500 text-white px-3 py-2 rounded-lg hover:bg-gray-600 transition text-sm">清除自定义</button>
                 </div>
                 <div id="profitProbabilityTable" class="overflow-x-auto"></div>
+                </div>
             </div>
 
             <!-- 相关性分析 -->
             <div id="correlationSection" class="bg-white p-6 rounded-xl shadow-md mb-6" style="display:none;">
-                <h3 class="text-lg font-semibold mb-3 text-gray-700">相关性分析</h3>
+                <div class="flex items-center justify-between mb-3">
+                    <h3 class="text-lg font-semibold text-gray-700">相关性分析</h3>
+                    <button id="toggleCorrelationBtn" class="text-sm text-gray-500 hover:text-gray-700 px-2 py-1 rounded border">▼ 展开</button>
+                </div>
+                <div id="correlationCollapsible" class="hidden">
                 <p class="text-sm text-gray-500 mb-4">投资计划中各基金日收益率（以交易日对齐）的皮尔逊相关系数矩阵。</p>
                 <div id="correlationTable" class="overflow-x-auto"></div>
                 <div id="correlationLegend" class="mt-4"></div>
                 <p class="text-xs text-gray-400 mt-3">本页面展示收益相关数据仅为历史数据测算，不构成收益保证或预示其未来表现。</p>
+                </div>
             </div>
 
             <!-- 图表日期范围筛选 -->
@@ -204,21 +214,31 @@
 
             <!-- 图表 -->
             <div class="space-y-8 mt-8">
-                <div>
-                    <h3 class="text-lg font-semibold mb-2 text-gray-700">组合净值 vs 比较基准</h3>
-                    <canvas id="netValueChart"></canvas>
+                <div id="netValueChartCard" class="bg-white p-6 rounded-xl shadow-md">
+                    <div class="flex items-center justify-between mb-4">
+                        <h3 class="text-lg font-semibold text-gray-700">组合净值 vs 比较基准</h3>
+                        <button id="toggleNetValueChartBtn" class="text-sm text-gray-500 hover:text-gray-700 px-2 py-1 rounded border">▼ 展开</button>
+                    </div>
+                    <div id="netValueChartCollapsible" class="hidden">
+                        <canvas id="netValueChart"></canvas>
+                    </div>
                 </div>
-                <div>
-                    <h3 class="text-lg font-semibold mb-2 text-gray-700">组合总资产曲线</h3>
-                    <canvas id="assetChart"></canvas>
+                <div id="assetChartCard" class="bg-white p-6 rounded-xl shadow-md">
+                    <div class="flex items-center justify-between mb-4">
+                        <h3 class="text-lg font-semibold text-gray-700">组合总资产曲线</h3>
+                        <button id="toggleAssetChartBtn" class="text-sm text-gray-500 hover:text-gray-700 px-2 py-1 rounded border">▼ 展开</button>
+                    </div>
+                    <div id="assetChartCollapsible" class="hidden">
+                        <canvas id="assetChart"></canvas>
+                    </div>
                 </div>
                 <!-- 5. 关键节点分析表格 -->
-                <div class="mt-8" id="analysisTableSection">
+                <div id="analysisTableSection" class="bg-white p-6 rounded-xl shadow-md">
                     <div class="flex items-center justify-between mb-2">
-                        <h3 class="text-lg font-semibold text-gray-700">📋 关键节点对比分析</h3>
-                        <button id="toggleAnalysisTableBtn" class="text-sm text-gray-500 hover:text-gray-700 px-2 py-1 rounded border">▲ 折叠表格</button>
+                        <h3 class="text-lg font-semibold text-gray-700">关键节点对比分析</h3>
+                        <button id="toggleAnalysisTableBtn" class="text-sm text-gray-500 hover:text-gray-700 px-2 py-1 rounded border">▼ 展开</button>
                     </div>
-                    <div id="analysisTableCollapsible">
+                    <div id="analysisTableCollapsible" class="hidden">
                         <div class="overflow-x-auto">
                             <table class="min-w-full bg-white border border-gray-200 rounded-lg text-sm">
                                 <thead class="bg-gray-100">
@@ -245,7 +265,7 @@
             </div>
 
             <!-- 6. 选定区间投资表现 -->
-            <div class="mt-8" id="periodMetricsSection" style="display:none;">
+            <div id="periodMetricsSection" class="bg-white p-6 rounded-xl shadow-md mt-8" style="display:none;">
                 <h3 class="text-lg font-semibold mb-3 text-gray-700">
                     📊 选定区间投资表现
                     <span id="periodRangeLabel" class="text-sm font-normal text-gray-500"></span>
@@ -643,6 +663,24 @@
 
         document.getElementById('equalWeightBtn').addEventListener('click', setEqualWeights);
         document.getElementById('generateCompositeBtn').addEventListener('click', generateCompositeBenchmark);
+
+        // 盈利概率 / 相关性分析 / 图表 独立折叠按钮
+        function bindToggle(btnId, collapsibleId) {
+            const btn = document.getElementById(btnId);
+            if (!btn) return;
+            btn.addEventListener('click', () => {
+                const c = document.getElementById(collapsibleId);
+                const collapsed = c.classList.toggle('hidden');
+                btn.textContent = collapsed ? '▼ 展开' : '▲ 折叠';
+                if (!collapsed && collapsibleId === 'netValueChartCollapsible' && netValueChart) netValueChart.resize();
+                if (!collapsed && collapsibleId === 'assetChartCollapsible' && assetChart) assetChart.resize();
+            });
+        }
+        bindToggle('toggleProfitProbBtn', 'profitProbCollapsible');
+        bindToggle('toggleCorrelationBtn', 'correlationCollapsible');
+        bindToggle('toggleNetValueChartBtn', 'netValueChartCollapsible');
+        bindToggle('toggleAssetChartBtn', 'assetChartCollapsible');
+        bindToggle('toggleAnalysisTableBtn', 'analysisTableCollapsible');
 
         // 初始化加载基准列表
         loadBenchmarkList();
