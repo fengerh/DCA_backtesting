@@ -1,0 +1,3032 @@
+        // ---------- 全局变量 ----------
+        let fundsData = {};
+        let investmentPlans = [];
+        let fillMissingNav = false;   // 是否对空白净值做前向填充（按前一交易日净值模拟）
+        let customPeriods = [];       // 盈利概率自定义持有期（年）
+        let profitMode = 'dca';       // 盈利概率口径：'dca'=定投模拟(资金加权) / 'twr'=组合净值(一次性买入)
+        let assetChart = null;
+        let netValueChart = null;
+        //let compositeWeights = {}; // 临时存储各基准权重 { benchmarkId: weight }
+        const RISK_FREE_RATE = 0.025;
+        const MIN_TRADE_DAYS = 30;
+        
+        let backtestResult = { dates: [], assets: [], netValues: [] };
+
+        // IndexedDB
+        const db = new Dexie('BenchmarkDB');
+        db.version(1).stores({ benchmarks: '++id, name' });
+        let currentBenchmarkId = null;
+        let compositeWeights = {}; // 临时存储各基准权重 { benchmarkId: weight }
+
+        // 工具函数：格式化日期为 yyyy-mm-dd
+        function formatDate(date) {
+            const year = date.getFullYear();
+            const month = String(date.getMonth() + 1).padStart(2, '0');
+            const day = String(date.getDate()).padStart(2, '0');
+            return `${year}-${month}-${day}`;
+        }
+
+        // 增强的日期解析：支持 yyyy-mm-dd 和 yyyy/m/d 格式（月日可带或不带前导零）
+        function parseDateString(str) {
+            if (!str || typeof str !== 'string') return new Date(NaN);
+            str = str.trim();
+            // 尝试 '-' 分隔
+            let parts = str.split('-');
+            if (parts.length === 3) {
+                let year = parseInt(parts[0]), month = parseInt(parts[1])-1, day = parseInt(parts[2]);
+                if (!isNaN(year) && !isNaN(month) && !isNaN(day) && month >= 0 && month <= 11 && day >= 1 && day <= 31) {
+                    return new Date(year, month, day);
+                }
+            }
+            // 尝试 '/' 分隔
+            parts = str.split('/');
+            if (parts.length === 3) {
+                let year = parseInt(parts[0]), month = parseInt(parts[1])-1, day = parseInt(parts[2]);
+                if (!isNaN(year) && !isNaN(month) && !isNaN(day) && month >= 0 && month <= 11 && day >= 1 && day <= 31) {
+                    return new Date(year, month, day);
+                }
+            }
+            return new Date(NaN);
+        }
+
+        // Excel 序列号 -> 本地日期（时区安全：取 UTC 日期分量按本地构造，避免差一天）
+        function excelSerialToDate(serial) {
+            const utcMs = Math.round((serial - 25569) * 86400000);
+            const d = new Date(utcMs);
+            return new Date(d.getUTCFullYear(), d.getUTCMonth(), d.getUTCDate());
+        }
+
+        // 增强解析：Date对象 / 数字序列号 / yyyy-mm-dd / yyyy/m/d / yyyy年m月d日 / yyyymmdd / 纯数字
+        function parseDateFlexible(raw) {
+            if (raw == null) return null;
+            if (raw instanceof Date) return raw;
+            if (typeof raw === 'number') return excelSerialToDate(raw);
+            if (typeof raw !== 'string') return null;
+            const s = raw.trim();
+            if (!s) return null;
+            const d = parseDateString(s);                 // 已有的 yyyy-mm-dd / yyyy/m/d
+            if (!isNaN(d.getTime())) return d;
+            let m = s.match(/^(\d{4})\s*年\s*(\d{1,2})\s*月\s*(\d{1,2})\s*日\s*$/);
+            if (m) {
+                const dt = new Date(+m[1], +m[2] - 1, +m[3]);
+                if (!isNaN(dt.getTime())) return dt;
+            }
+            if (/^\d{8}$/.test(s)) {                       // 紧凑 yyyymmdd
+                const dt = new Date(+s.slice(0,4), +s.slice(4,6) - 1, +s.slice(6,8));
+                if (!isNaN(dt.getTime())) return dt;
+            }
+            if (/^\d+(\.\d+)?$/.test(s)) return excelSerialToDate(parseFloat(s)); // 数字序列号
+            return null;
+        }
+
+        // 基准列表渲染（含日期范围）
+        async function loadBenchmarkList() {
+            compositeWeights = {}; // 新增：每次刷新基准列表时清空临时权重
+            const benchmarks = await db.benchmarks.toArray();
+            const container = document.getElementById('benchmarkList');
+            const select = document.getElementById('benchmarkSelect');
+            
+            if (benchmarks.length === 0) {
+                container.innerHTML = '<p class="text-gray-400 text-sm text-center py-2">暂无基准，请上传 Excel 文件</p>';
+            } else {
+                container.innerHTML = benchmarks.map(b => {
+                    const firstDate = b.data[0]?.date || '?';
+                    const lastDate = b.data[b.data.length-1]?.date || '?';
+                    return `
+                    <div class="flex items-center justify-between bg-white p-2 rounded border">
+                        <div class="flex items-center gap-2">
+                            <input type="radio" name="activeBenchmark" value="${b.id}" ${currentBenchmarkId == b.id ? 'checked' : ''} class="benchmark-radio">
+                            <div>
+                                <span class="text-sm font-medium">${b.name}</span>
+                                <span class="text-xs text-gray-500 ml-2">${firstDate} ~ ${lastDate}</span>
+                                <span class="text-xs text-gray-400 ml-1">(${b.data.length}条)</span>
+                            </div>
+                        </div>
+                        <button class="text-red-500 hover:text-red-700 text-sm delete-benchmark" data-id="${b.id}">删除</button>
+                    </div>
+                `}).join('');
+            }
+
+            select.innerHTML = '<option value="">-- 无 --</option>';
+            benchmarks.forEach(b => {
+                const option = document.createElement('option');
+                option.value = b.id;
+                option.textContent = `${b.name} (${b.data[0]?.date?.slice(0,7) || ''})`;
+                if (currentBenchmarkId == b.id) option.selected = true;
+                select.appendChild(option);
+            });
+
+            document.querySelectorAll('.benchmark-radio').forEach(radio => {
+                radio.addEventListener('change', (e) => {
+                    currentBenchmarkId = parseInt(e.target.value);
+                    select.value = currentBenchmarkId;
+                    if (backtestResult.dates.length) updateCharts();
+                });
+            });
+            document.querySelectorAll('.delete-benchmark').forEach(btn => {
+                btn.addEventListener('click', async (e) => {
+                    const id = parseInt(e.target.dataset.id);
+                    if (confirm('确定删除该基准吗？')) {
+                        await db.benchmarks.delete(id);
+                        if (currentBenchmarkId === id) { currentBenchmarkId = null; select.value = ''; }
+                        await loadBenchmarkList();
+                        if (backtestResult.dates.length) updateCharts();
+                    }
+                });
+            });
+            select.onchange = () => {
+                currentBenchmarkId = select.value ? parseInt(select.value) : null;
+                document.querySelectorAll('.benchmark-radio').forEach(r => r.checked = r.value == select.value);
+                if (backtestResult.dates.length) updateCharts(); // 这会触发图表和表格的更新
+            };
+        }
+
+        // 渲染合成基准的权重输入界面
+        async function renderCompositePanel() {
+            const benchmarks = await db.benchmarks.toArray();
+            const container = document.getElementById('compositeWeightsContainer');
+            if (benchmarks.length === 0) {
+                container.innerHTML = '<p class="text-gray-400 text-sm">暂无基准数据，请先上传基准</p>';
+                return;
+            }
+            let html = '';
+            benchmarks.forEach(b => {
+                const weight = compositeWeights[b.id] || 0;
+                html += `
+                    <div class="flex items-center justify-between bg-white p-2 rounded border">
+                        <span class="text-sm font-medium">${b.name}</span>
+                        <div class="flex items-center gap-2">
+                            <input type="number" min="0" max="100" step="0.1" value="${weight}" 
+                                class="composite-weight-input w-20 p-1 border rounded text-sm" data-id="${b.id}">
+                            <span class="text-xs text-gray-500">%</span>
+                        </div>
+                    </div>
+                `;
+            });
+            container.innerHTML = html;
+            updateTotalWeight();
+            
+            document.querySelectorAll('.composite-weight-input').forEach(input => {
+                input.addEventListener('input', (e) => {
+                    const id = parseInt(e.target.dataset.id);
+                    compositeWeights[id] = parseFloat(e.target.value) || 0;
+                    updateTotalWeight();
+                });
+            });
+        }
+
+        // 更新总权重显示及生成按钮状态
+        function updateTotalWeight() {
+            const total = Object.values(compositeWeights).reduce((sum, w) => sum + w, 0);
+            document.getElementById('totalWeightDisplay').textContent = total.toFixed(1);
+            const btn = document.getElementById('generateCompositeBtn');
+            btn.disabled = (Math.abs(total - 100) > 0.01);
+        }
+
+        // 平均分配权重
+        function setEqualWeights() {
+            const ids = Object.keys(compositeWeights);
+            if (ids.length === 0) return;
+            const equal = 100 / ids.length;
+            ids.forEach(id => compositeWeights[id] = equal);
+            renderCompositePanel();
+        }
+
+        // 生成合成基准
+        async function generateCompositeBenchmark() {
+            const benchmarks = await db.benchmarks.toArray();
+            const activeIds = Object.keys(compositeWeights).filter(id => compositeWeights[id] > 0);
+            if (activeIds.length === 0) {
+                alert('至少需要一个基准权重 > 0');
+                return;
+            }
+            
+            const selectedBenchmarks = benchmarks.filter(b => activeIds.includes(String(b.id)));
+            const allDatesSet = new Set();
+            selectedBenchmarks.forEach(b => b.data.forEach(d => allDatesSet.add(d.date)));
+            const allDates = Array.from(allDatesSet).sort();
+            
+            if (allDates.length === 0) {
+                alert('没有可用的日期数据');
+                return;
+            }
+            
+            // 第一步：为每个基准计算归一化净值（以第一个共同日期为基准1.0）
+            const normalizedData = [];
+            
+            for (const bm of selectedBenchmarks) {
+                const bmMap = new Map(bm.data.map(d => [d.date, d.nav]));
+                
+                // 找到该基准在合成期间的第一个有效净值
+                let baseNav = null;
+                for (const date of allDates) {
+                    const nav = bmMap.get(date);
+                    if (nav !== undefined) {
+                        baseNav = nav;
+                        break;
+                    }
+                }
+                
+                if (baseNav === null) continue;
+                
+                // 计算该基准的归一化净值序列
+                const normalizedSeries = [];
+                for (const date of allDates) {
+                    let nav = bmMap.get(date);
+                    if (nav === undefined) {
+                        // 前向填充
+                        const bmData = bm.data;
+                        for (let i = bmData.length - 1; i >= 0; i--) {
+                            if (bmData[i].date <= date) {
+                                nav = bmData[i].nav;
+                                break;
+                            }
+                        }
+                    }
+                    if (nav !== undefined) {
+                        normalizedSeries.push({
+                            date: date,
+                            normalizedNav: nav / baseNav  // 归一化到1.0
+                        });
+                    }
+                }
+                
+                if (normalizedSeries.length > 0) {
+                    normalizedData.push({
+                        id: bm.id,
+                        name: bm.name,
+                        weight: compositeWeights[bm.id] / 100,  // 转换为小数权重
+                        series: normalizedSeries
+                    });
+                }
+            }
+            
+            if (normalizedData.length === 0) {
+                alert('未能生成有效合成数据');
+                return;
+            }
+            
+            // 第二步：按日期加权合成
+            const compositeData = [];
+            for (const date of allDates) {
+                let compositeNav = 0;
+                let hasData = false;
+                
+                for (const bm of normalizedData) {
+                    const dayData = bm.series.find(d => d.date === date);
+                    if (dayData) {
+                        compositeNav += dayData.normalizedNav * bm.weight;
+                        hasData = true;
+                    }
+                }
+                
+                if (hasData && compositeNav > 0) {
+                    compositeData.push({ date, nav: compositeNav });
+                }
+            }
+            
+            if (compositeData.length === 0) {
+                alert('未能生成有效合成数据');
+                return;
+            }
+            
+            // 构建带有权重的名称
+            const nameParts = [];
+            for (const bm of selectedBenchmarks) {
+                const weight = compositeWeights[bm.id];
+                if (weight > 0) {
+                    const formattedWeight = Number.isInteger(weight) ? weight.toFixed(0) : weight.toFixed(1);
+                    nameParts.push(`${bm.name}*${formattedWeight}%`);
+                }
+            }
+            const name = '合成_' + nameParts.join('+');
+
+            await db.benchmarks.add({ name, data: compositeData });
+            compositeWeights = {};
+            document.getElementById('compositePanel').classList.add('hidden');
+            await loadBenchmarkList();
+            alert(`合成基准 "${name}" 已生成，共 ${compositeData.length} 条记录`);
+        }
+
+        // 清空所有基准数据
+        async function clearAllBenchmarks() {
+            if (confirm('确定要清空所有已保存的基准吗？此操作不可恢复。')) {
+                await db.benchmarks.clear();
+                currentBenchmarkId = null;
+                document.getElementById('benchmarkSelect').value = '';
+                await loadBenchmarkList();
+                if (backtestResult.dates.length) updateCharts();
+                alert('已清空所有基准数据');
+            }
+        }
+
+        // 解析Sheet数据
+        function parseSheetData(sheet) {
+            const json = XLSX.utils.sheet_to_json(sheet, { header: 1, raw: true });
+            if (json.length < 2) return [];
+            const data = [];
+            for (let i = 1; i < json.length; i++) {
+                const row = json[i];
+                if (!row || row.length < 2) continue;
+                const rawDate = row[0];
+                const nav = parseFloat(row[1]);
+                if (isNaN(nav)) continue;
+                const date = parseDateFlexible(rawDate);
+                if (!date || isNaN(date.getTime())) continue;
+                data.push({ date: formatDate(date), nav });
+            }
+            data.sort((a,b) => a.date.localeCompare(b.date));
+            return data;
+        }
+
+        // 上传基准按钮事件
+        document.getElementById('uploadBenchmarkBtn').addEventListener('click', async () => {
+            const fileInput = document.getElementById('benchmarkFileInput');
+            const nameInput = document.getElementById('benchmarkName');
+            const file = fileInput.files[0];
+            if (!file) { alert('请选择 Excel 文件'); return; }
+            const reader = new FileReader();
+            reader.onload = async (e) => {
+                const data = new Uint8Array(e.target.result);
+                const workbook = XLSX.read(data, { type: 'array', cellDates: true });
+                const sheetNames = workbook.SheetNames;
+                if (sheetNames.length === 0) { alert('Excel 文件中没有 Sheet'); return; }
+                let importCount = 0;
+                for (const sheetName of sheetNames) {
+                    const sheet = workbook.Sheets[sheetName];
+                    const parsed = parseSheetData(sheet);
+                    if (parsed.length === 0) continue;
+                    let benchmarkName = sheetName;
+                    if (sheetNames.length === 1) {
+                        const custom = nameInput && nameInput.value.trim();
+                        if (custom) benchmarkName = custom;
+                    }
+                    await db.benchmarks.add({ name: benchmarkName, data: parsed });
+                    importCount++;
+                }
+                if (importCount === 0) alert('未解析到有效数据，请检查日期列格式（支持 Excel 日期、数字序列号、yyyy-mm-dd、yyyy/m/d、yyyy年m月d日、yyyymmdd）');
+                else alert(`成功导入 ${importCount} 个基准`);
+                fileInput.value = '';
+                if (nameInput) nameInput.value = '沪深300';
+                await loadBenchmarkList();
+            };
+            reader.readAsArrayBuffer(file);
+        });
+
+        // 合成基准面板切换
+        document.getElementById('toggleCompositePanelBtn').addEventListener('click', async () => {
+            const panel = document.getElementById('compositePanel');
+            panel.classList.toggle('hidden');
+            if (!panel.classList.contains('hidden')) {
+                await renderCompositePanel();
+            }
+        });
+
+        document.getElementById('equalWeightBtn').addEventListener('click', setEqualWeights);
+        document.getElementById('generateCompositeBtn').addEventListener('click', generateCompositeBenchmark);
+
+        // 盈利概率 / 相关性分析 / 图表 独立折叠按钮
+        function bindToggle(btnId, collapsibleId) {
+            const btn = document.getElementById(btnId);
+            if (!btn) return;
+            btn.addEventListener('click', () => {
+                const c = document.getElementById(collapsibleId);
+                const collapsed = c.classList.toggle('hidden');
+                btn.textContent = collapsed ? '▼ 展开' : '▲ 折叠';
+                if (!collapsed && collapsibleId === 'netValueChartCollapsible' && netValueChart) netValueChart.resize();
+                if (!collapsed && collapsibleId === 'assetChartCollapsible' && assetChart) assetChart.resize();
+            });
+        }
+        bindToggle('toggleProfitProbBtn', 'profitProbCollapsible');
+        bindToggle('toggleCorrelationBtn', 'correlationCollapsible');
+        bindToggle('toggleNetValueChartBtn', 'netValueChartCollapsible');
+        bindToggle('toggleAssetChartBtn', 'assetChartCollapsible');
+        bindToggle('toggleAnalysisTableBtn', 'analysisTableCollapsible');
+
+        // 初始化加载基准列表
+        loadBenchmarkList();
+
+        // XIRR
+        function xirr(cashFlows, dates, guess = 0.1) {
+            if (cashFlows.length !== dates.length || cashFlows.length < 2) return NaN;
+            const paired = cashFlows.map((cf, i) => ({ cf, date: dates[i] }));
+            paired.sort((a, b) => a.date - b.date);
+            const sortedFlows = paired.map(p => p.cf);
+            const sortedDates = paired.map(p => p.date);
+            const maxIterations = 100, tolerance = 1e-6;
+            let rate = guess;
+            for (let i = 0; i < maxIterations; i++) {
+                let npv = 0, npvDerivative = 0;
+                const baseDate = sortedDates[0];
+                for (let j = 0; j < sortedFlows.length; j++) {
+                    const days = (sortedDates[j] - baseDate) / (1000 * 60 * 60 * 24);
+                    const term = Math.pow(1 + rate, days / 365);
+                    npv += sortedFlows[j] / term;
+                    npvDerivative -= sortedFlows[j] * days / 365 * Math.pow(1 + rate, days / 365 - 1);
+                }
+                if (Math.abs(npv) < tolerance) return rate;
+                if (Math.abs(npvDerivative) < tolerance) break;
+                rate -= npv / npvDerivative;
+            }
+            return NaN;
+        }
+
+        // 通用指标计算：由对齐后的日期/资产/每日投入序列计算净值曲线与风险收益指标
+        // 与组合回测口径完全一致，供组合回测与策略比较共用
+        function computeMetrics(validDates, validAssets, validInvest) {
+            const n = validAssets.length;
+            // 净值曲线：以首日期资产归一化到 1（组合净值，用于净值图与盈利概率）
+            const netValues = n > 0
+                ? validAssets.map(a => validAssets[0] > 0 ? a / validAssets[0] : 1)
+                : [];
+            // 日收益率序列
+            const rets = [];
+            for (let i = 1; i < n; i++) {
+                const prev = validAssets[i - 1], cur = validAssets[i];
+                if (prev > 0) rets.push(cur / prev - 1);
+            }
+            // 时间加权年化收益率：(期末/期初)^(1/年) - 1，按 252 交易日年化
+            let annualReturnPct = NaN;
+            if (n >= 2 && validAssets[0] > 0) {
+                const total = validAssets[n - 1] / validAssets[0];
+                const years = (n - 1) / 252;
+                if (years > 0 && total > 0) annualReturnPct = (Math.pow(total, 1 / years) - 1) * 100;
+            }
+            // 波动率 / 夏普 / 胜率（正收益日占比）
+            let annualVolatility = NaN, sharpeRatio = NaN, winRate = NaN;
+            if (rets.length >= 2) {
+                const mean = rets.reduce((s, r) => s + r, 0) / rets.length;
+                const variance = rets.reduce((s, r) => s + (r - mean) * (r - mean), 0) / rets.length;
+                const dailyStd = Math.sqrt(variance);
+                annualVolatility = dailyStd * Math.sqrt(252);
+                const annRet = (!isNaN(annualReturnPct)) ? annualReturnPct / 100 : mean * 252;
+                sharpeRatio = annualVolatility > 0 ? (annRet - RISK_FREE_RATE) / annualVolatility : NaN;
+                winRate = rets.filter(r => r > 0).length / rets.length * 100;
+            } else if (rets.length === 1) {
+                winRate = rets[0] > 0 ? 100 : 0;
+            }
+            // 最大回撤及持续天数（基于资产序列）
+            let maxDrawdown = 0, maxDDDuration = 0;
+            if (n > 0) {
+                let peakV = validAssets[0], peakIdx = 0;
+                let curMaxDD = 0, ddPeakIdx = 0, ddTroughIdx = 0;
+                for (let i = 0; i < n; i++) {
+                    if (validAssets[i] > peakV) { peakV = validAssets[i]; peakIdx = i; }
+                    const dd = peakV > 0 ? (peakV - validAssets[i]) / peakV : 0;
+                    if (dd > curMaxDD) { curMaxDD = dd; ddPeakIdx = peakIdx; ddTroughIdx = i; }
+                }
+                maxDrawdown = curMaxDD * 100;
+                if (ddTroughIdx > ddPeakIdx) {
+                    const ms = validDates[ddTroughIdx].getTime() - validDates[ddPeakIdx].getTime();
+                    maxDDDuration = Math.max(0, Math.round(ms / 86400000));
+                }
+            }
+            const calmarRatio = (!isNaN(annualReturnPct) && maxDrawdown > 0) ? annualReturnPct / maxDrawdown : NaN;
+            return { netValues, annualVolatility, sharpeRatio, calmarRatio, maxDrawdown, annualReturnPct, winRate, maxDDDuration };
+        }
+
+        // 基金上传
+        document.getElementById('fileInput').addEventListener('change', function(e) {
+            const file = e.target.files[0];
+            if (!file) return;
+            const reader = new FileReader();
+            reader.onload = function(e) {
+                const data = new Uint8Array(e.target.result);
+                const workbook = XLSX.read(data, {type: 'array', cellDates: true});
+                fundsData = {};
+                let infoHtml = '<div class="font-medium text-green-600 mb-2">✅ 已加载基金：</div><ul class="list-disc list-inside space-y-1">';
+                workbook.SheetNames.forEach(name => {
+                    const sheet = workbook.Sheets[name];
+                    const json = XLSX.utils.sheet_to_json(sheet, {header: 1, raw: true});
+                    const dates = [], nav = [], div = [];
+                    for (let i = 1; i < json.length; i++) {
+                        if (json[i][0] && json[i][1] !== undefined) {
+                            const date = parseDateFlexible(json[i][0]);
+                            if (!isNaN(date.getTime())) {
+                                dates.push(date);
+                                nav.push(parseFloat(json[i][1]));
+                                div.push(parseFloat(json[i][2]) || 0);
+                            }
+                        }
+                    }
+                    if (dates.length > 0) {
+                        const minDate = formatDate(dates[0]);
+                        const maxDate = formatDate(dates[dates.length-1]);
+                        fundsData[name] = {dates, nav, div, minDate, maxDate};
+                        infoHtml += `<li><strong>${name}</strong>：${minDate} ~ ${maxDate}</li>`;
+                    }
+                });
+                infoHtml += '</ul>';
+                document.getElementById('fundInfo').innerHTML = infoHtml;
+                const fundSelect = document.getElementById('fundSelect');
+                fundSelect.innerHTML = '';
+                Object.keys(fundsData).forEach(code => {
+                    const option = document.createElement('option');
+                    option.value = code;
+                    option.textContent = code;
+                    fundSelect.appendChild(option);
+                });
+                const firstFund = fundsData[Object.keys(fundsData)[0]];
+                document.getElementById('startDate').value = firstFund.minDate;
+                document.getElementById('startDate').min = firstFund.minDate;
+                document.getElementById('startDate').max = firstFund.maxDate;
+                document.getElementById('endDate').value = firstFund.maxDate;
+                document.getElementById('endDate').min = firstFund.minDate;
+                document.getElementById('endDate').max = firstFund.maxDate;
+                document.getElementById('planSection').style.display = 'block';
+                document.getElementById('planListSection').style.display = 'block';
+                document.getElementById('resultSection').style.display = 'block';
+            };
+            reader.readAsArrayBuffer(file);
+        });
+
+        document.getElementById('fundSelect').addEventListener('change', function() {
+            const fund = fundsData[this.value];
+            document.getElementById('startDate').value = fund.minDate;
+            document.getElementById('startDate').min = fund.minDate;
+            document.getElementById('startDate').max = fund.maxDate;
+            document.getElementById('endDate').value = fund.maxDate;
+            document.getElementById('endDate').min = fund.minDate;
+            document.getElementById('endDate').max = fund.maxDate;
+        });
+        document.getElementById('invType').addEventListener('change', function() {
+            document.getElementById('endDateDiv').style.display = this.value === 'single' ? 'none' : 'block';
+        });
+
+        function addPlan() {
+            const fund = document.getElementById('fundSelect').value;
+            const type = document.getElementById('invType').value;
+            const startDate = document.getElementById('startDate').value;
+            const endDate = document.getElementById('endDate').value;
+            const amount = parseFloat(document.getElementById('amount').value);
+            const div = document.getElementById('divMethod').value;
+            if (!fund || !startDate || amount <= 0) { alert('请填写完整信息！'); return; }
+            const plan = { id: Date.now(), fund, type, startDate, endDate: type === 'single' ? startDate : endDate, amount, div };
+            const existingIndex = investmentPlans.findIndex(p => p.fund === fund);
+            if (existingIndex !== -1) {
+                if (!confirm(`基金 ${fund} 已有计划，是否覆盖？`)) return;
+                investmentPlans[existingIndex] = plan;
+            } else investmentPlans.push(plan);
+            renderPlanList();
+            checkNavGaps();
+        }
+        function deletePlan(id) { investmentPlans = investmentPlans.filter(p => p.id !== id); renderPlanList(); checkNavGaps(); }
+        function clearAllPlans() { if (confirm('清空所有计划？')) { investmentPlans = []; renderPlanList(); checkNavGaps(); } }
+
+        // 检测基金净值空档：以计划内所有基金日期并集为参照日历，若某基金成立后、参照日历有而自身缺，则视为空白
+        function checkNavGaps() {
+            const hint = document.getElementById('navGapHint');
+            if (!hint) return;
+            if (investmentPlans.length === 0) { hint.classList.add('hidden'); hint.innerHTML = ''; return; }
+
+            const allSet = new Set();
+            const fundsInPlan = [...new Set(investmentPlans.map(p => p.fund))];
+            fundsInPlan.forEach(code => {
+                const f = fundsData[code];
+                if (f) f.dates.forEach(d => allSet.add(formatDate(d)));
+            });
+            const allStrs = Array.from(allSet).sort();
+
+            const gapFunds = [];
+            fundsInPlan.forEach(code => {
+                const f = fundsData[code];
+                if (!f || f.dates.length === 0) return;
+                const firstDs = formatDate(f.dates[0]);          // 基金成立日
+                const ownSet = new Set(f.dates.map(d => formatDate(d)));
+                let missing = 0;
+                for (const ds of allStrs) {
+                    if (ds < firstDs) continue;                  // 尚未成立，不算空白
+                    if (!ownSet.has(ds)) missing++;              // 成立后、参照日历有而本基金缺 -> 空白
+                }
+                if (missing > 0) gapFunds.push({ code, missing });
+            });
+
+            if (gapFunds.length === 0) {
+                hint.classList.remove('hidden');
+                hint.innerHTML = '<span class="text-green-600 text-sm">✓ 所有基金净值日期一致，无需填充。</span>';
+                return;
+            }
+            const names = gapFunds.map(g => `${g.code}(缺失${g.missing}天)`).join('、');
+            hint.classList.remove('hidden');
+            hint.innerHTML = `⚠ 检测到以下基金相对于其它基金存在空白净值：${names}。缺失日将按前一交易日净值模拟填充。
+                <label class="ml-2 inline-flex items-center gap-1 text-sm font-medium text-amber-700 cursor-pointer">
+                    <input type="checkbox" id="fillNavCheck" ${fillMissingNav ? 'checked' : ''} onchange="fillMissingNav=this.checked"> 填充空白净值
+                </label>`;
+        }
+        // 从 fundsData 的 key（"代码_基金名称"）拆分出代码与名称
+        function fundCodeName(key) {
+            const idx = String(key).indexOf('_');
+            if (idx > 0) return { code: key.slice(0, idx), name: key.slice(idx + 1) };
+            return { code: String(key), name: String(key) };
+        }
+
+        function renderPlanList() {
+            const container = document.getElementById('planList');
+            if (investmentPlans.length === 0) { container.innerHTML = '<p class="text-gray-500 text-sm">暂无计划</p>'; return; }
+            container.innerHTML = investmentPlans.map((p, i) => {
+                const typeText = p.type === 'single' ? '单笔' : p.type === 'weekly' ? '每周定投' : '每月定投';
+                const divText = p.div === 'reinvest' ? '红利再投资' : '现金分红';
+                const cn = fundCodeName(p.fund);
+                const dateText = p.type === 'single' ? p.startDate : `${p.startDate}~${p.endDate}`;
+                let durText = '—';
+                if (p.type !== 'single') {
+                    const sd = new Date(p.startDate + 'T00:00:00');
+                    const ed = new Date(p.endDate + 'T00:00:00');
+                    if (!isNaN(sd) && !isNaN(ed) && ed >= sd) durText = (Math.round((ed - sd) / 86400000) / 365).toFixed(2) + ' 年';
+                }
+                return `<div class="flex justify-between items-center p-3 bg-gray-50 rounded-lg">
+                    <div class="text-sm"><span class="font-medium">${i+1}.</span> <span class="font-mono text-gray-500">${cn.code}</span> <strong>${cn.name || cn.code}</strong> | ${typeText} | ${p.amount.toFixed(0)}元 | ${divText} | ${dateText} | ${durText}</div>
+                    <button onclick="deletePlan(${p.id})" class="text-red-500 hover:text-red-700 text-sm font-medium">删除</button>
+                </div>`;
+            }).join('');
+        }
+
+        // 核心回测（保持不变）
+        function runBacktest() {
+            if (investmentPlans.length === 0) { alert('请先添加投资计划！'); return; }
+            const fundShares = {}; Object.keys(fundsData).forEach(code => fundShares[code] = 0);
+            let totalCash = 0;
+            const dailyAsset = [], dailyDates = [], dailyInvest = [], dailyCashDiv = [];
+            const cashFlows = [], flowDates = [];
+
+            const allDatesSet = new Set();
+            Object.values(fundsData).forEach(f => f.dates.forEach(d => allDatesSet.add(formatDate(d))));
+            const allDateStrs = Array.from(allDatesSet).sort();
+            const allDates = allDateStrs.map(str => new Date(str + 'T00:00:00'));
+            const earliestInvestDate = new Date(Math.min(...investmentPlans.map(p => new Date(p.startDate).getTime())));
+
+            // 为每个基金构建前向填充净值表：参照并集日期，成立后缺失日用最近一次已知净值填充
+            const fundNavMap = {};
+            const simNav = {};        // 与 allDateStrs 对齐的前向填充净值数组（未成立为 null）
+            const simDiv = {};        // 与 allDateStrs 对齐的每份额分红数组（无分红为 0）
+            const simDow = new Array(allDateStrs.length);   // 每日期的星期（0=周日），避免热循环中重复构造 Date
+            for (let k = 0; k < allDateStrs.length; k++) simDow[k] = new Date(allDateStrs[k] + 'T00:00:00').getUTCDay();
+            // 预缓存时间戳与“日”数值，供定投模拟热循环直接使用（消除内层 new Date 与字符串 split）
+            const simDateTs = new Array(allDateStrs.length);
+            const simDayOfMonth = new Array(allDateStrs.length);
+            for (let k = 0; k < allDateStrs.length; k++) { simDateTs[k] = allDates[k].getTime(); simDayOfMonth[k] = parseInt(allDateStrs[k].split('-')[2], 10); }
+            Object.keys(fundsData).forEach(code => {
+                const f = fundsData[code];
+                const realNav = new Map(f.dates.map((d, i) => [formatDate(d), f.nav[i]]));
+                const realDiv = new Map(f.dates.map((d, i) => [formatDate(d), f.div[i]]));
+                const m = new Map();
+                const navArr = new Array(allDateStrs.length).fill(null);
+                const divArr = new Array(allDateStrs.length).fill(0);
+                let lastNav = null;            // 基金尚未成立时为 null，不填充
+                for (let k = 0; k < allDateStrs.length; k++) {
+                    const ds = allDateStrs[k];
+                    if (realNav.has(ds)) lastNav = realNav.get(ds);
+                    if (lastNav !== null) { m.set(ds, lastNav); navArr[k] = lastNav; }
+                    if (realDiv.has(ds)) divArr[k] = realDiv.get(ds);
+                }
+                fundNavMap[code] = m;
+                simNav[code] = navArr;
+                simDiv[code] = divArr;
+            });
+            const doFill = fillMissingNav;
+
+            for (let dtIdx = 0; dtIdx < allDates.length; dtIdx++) {
+                const currentDt = allDates[dtIdx];
+                const dateStr = allDateStrs[dtIdx];
+                let dailyInv = 0;
+                for (const plan of investmentPlans) {
+                    const fund = plan.fund;
+                    const fundData = fundsData[fund];
+                    const fundDateIdx = fundData.dates.findIndex(d => formatDate(d) === dateStr);
+                    if (fundDateIdx === -1) continue;
+                    const divPerShare = fundData.div[fundDateIdx];
+                    const nav = fundData.nav[fundDateIdx];
+                    if (fundShares[fund] > 0 && divPerShare > 0) {
+                        const totalDiv = fundShares[fund] * divPerShare;
+                        if (plan.div === 'reinvest') fundShares[fund] += totalDiv / nav;
+                        else { totalCash += totalDiv; cashFlows.push(totalDiv); flowDates.push(new Date(currentDt)); }
+                    }
+                }
+                for (const plan of investmentPlans) {
+                    const fund = plan.fund;
+                    const fundData = fundsData[fund];
+                    let nav;
+                    if (doFill) {
+                        nav = fundNavMap[fund].get(dateStr);
+                        if (nav === undefined) continue;        // 基金尚未成立
+                    } else {
+                        const fundDateIdx = fundData.dates.findIndex(d => formatDate(d) === dateStr);
+                        if (fundDateIdx === -1) continue;
+                        nav = fundData.nav[fundDateIdx];
+                    }
+                    const amt = plan.amount;
+                    const currentDateStr = dateStr;
+                    let shouldInvest = false;
+                    if (plan.type === 'single') { if (currentDateStr === plan.startDate) shouldInvest = true; }
+                    else if (plan.type === 'weekly') {
+                        if (currentDateStr >= plan.startDate && currentDateStr <= plan.endDate) {
+                            const d = new Date(currentDateStr + 'T00:00:00');
+                            if (d.getUTCDay() === 1) shouldInvest = true;
+                        }
+                    } else if (plan.type === 'monthly') {
+                        if (currentDateStr >= plan.startDate && currentDateStr <= plan.endDate) {
+                            if (parseInt(currentDateStr.split('-')[2]) === 1) shouldInvest = true;
+                        }
+                    }
+                    if (shouldInvest) {
+                        fundShares[fund] += amt / nav;
+                        dailyInv += amt;
+                        cashFlows.push(-amt);
+                        flowDates.push(new Date(currentDt));
+                    }
+                }
+                let mv = 0;
+                for (const code of Object.keys(fundShares)) {
+                    const fundData = fundsData[code];
+                    let nav;
+                    if (doFill) nav = fundNavMap[code].get(dateStr);
+                    else { const idx = fundData.dates.findIndex(d => formatDate(d) === dateStr); if (idx !== -1) nav = fundData.nav[idx]; }
+                    if (nav !== undefined) mv += fundShares[code] * nav;
+                }
+                dailyAsset.push(mv + totalCash);
+                dailyDates.push(new Date(currentDt));
+                dailyInvest.push(dailyInv);
+                dailyCashDiv.push(totalCash);
+            }
+
+            let marketValue = 0;
+            for (const code of Object.keys(fundShares)) {
+                const fundData = fundsData[code];
+                marketValue += fundShares[code] * fundData.nav[fundData.nav.length-1];
+            }
+            const cashDiv = totalCash;
+            const totalAsset = marketValue + cashDiv;
+            cashFlows.push(marketValue);
+            flowDates.push(dailyDates[dailyDates.length-1]);
+            const totalInvest = -cashFlows.reduce((s, v) => s + (v < 0 ? v : 0), 0);
+            const totalReturn = totalInvest > 0 ? (totalAsset / totalInvest - 1) * 100 : 0;
+            const combined = flowDates.map((d, i) => ({ date: d, cf: cashFlows[i] }));
+            combined.sort((a, b) => a.date - b.date);
+            const xirrVal = xirr(combined.map(c=>c.cf), combined.map(c=>c.date)) * 100;
+
+            const startIdx = dailyDates.findIndex(d => d >= earliestInvestDate);
+            const validDates = dailyDates.slice(startIdx);
+            const validAssets = dailyAsset.slice(startIdx);
+            const validInvest = dailyInvest.slice(startIdx);
+            const validCashDivs = dailyCashDiv.slice(startIdx);
+
+            const _m = computeMetrics(validDates, validAssets, validInvest);
+            let annualVolatility = _m.annualVolatility, sharpeRatio = _m.sharpeRatio, calmarRatio = _m.calmarRatio, maxDrawdown = _m.maxDrawdown;
+            let annualReturnPct = _m.annualReturnPct, winRate = _m.winRate, maxDDDuration = _m.maxDDDuration, netValues = _m.netValues;
+            backtestResult = { dates: validDates, assets: validAssets, netValues, invests: validInvest, cashDivs: validCashDivs,
+                simDateStrs: allDateStrs, simNav: simNav, simDiv: simDiv, simDow: simDow, simDateTs: simDateTs, simDayOfMonth: simDayOfMonth, simStartIdx: startIdx };
+
+            const twrHtml = isNaN(annualReturnPct) ? '-' : annualReturnPct.toFixed(2) + '%';
+            const winHtml = isNaN(winRate) ? '-' : winRate.toFixed(1) + '%';
+            let riskHtml = validDates.length >= MIN_TRADE_DAYS ? `
+                <div class="bg-rose-50 p-4 rounded-lg text-center" data-mkey="最大回撤"><div class="text-sm text-slate-500">最大回撤</div><div class="text-2xl font-bold text-rose-600">${maxDrawdown.toFixed(2)}%</div></div>
+                <div class="bg-rose-50 p-4 rounded-lg text-center" data-mkey="回撤持续天数"><div class="text-sm text-slate-500">回撤持续天数</div><div class="text-2xl font-bold text-rose-600">${maxDDDuration.toFixed(0)} 天</div></div>
+                <div class="bg-rose-50 p-4 rounded-lg text-center" data-mkey="年化波动率"><div class="text-sm text-slate-500">年化波动率</div><div class="text-2xl font-bold text-rose-600">${(annualVolatility*100).toFixed(2)}%</div></div>
+                <div class="bg-rose-50 p-4 rounded-lg text-center" data-mkey="夏普/卡玛"><div class="text-sm text-slate-500">夏普/卡玛</div><div class="text-2xl font-bold text-rose-600">${sharpeRatio.toFixed(2)}/${calmarRatio.toFixed(2)}</div></div>
+            ` : `<div class="bg-gray-100 p-4 rounded-lg text-center col-span-4" data-mkey="风险指标"><div class="text-sm text-gray-600">风险指标</div><div class="text-xl font-medium text-gray-500">投资时间不足${MIN_TRADE_DAYS}个交易日，以下指标暂不可用</div></div>`;
+
+            document.getElementById('metrics').innerHTML = `
+                <div class="bg-blue-50 p-4 rounded-lg text-center" data-mkey="总投入本金"><div class="text-sm text-slate-500">总投入本金</div><div class="text-2xl font-bold text-blue-700">${totalInvest.toFixed(2)} 元</div></div>
+                <div class="bg-blue-50 p-4 rounded-lg text-center" data-mkey="持仓市值"><div class="text-sm text-slate-500">持仓市值</div><div class="text-2xl font-bold text-blue-700">${marketValue.toFixed(2)} 元</div></div>
+                <div class="bg-blue-50 p-4 rounded-lg text-center" data-mkey="累计现金分红"><div class="text-sm text-slate-500">累计现金分红</div><div class="text-2xl font-bold text-blue-700">${cashDiv.toFixed(2)} 元</div></div>
+                <div class="bg-blue-50 p-4 rounded-lg text-center" data-mkey="总资产"><div class="text-sm text-slate-500">总资产</div><div class="text-2xl font-bold text-blue-700">${totalAsset.toFixed(2)} 元</div></div>
+
+                <div class="bg-emerald-50 p-4 rounded-lg text-center" data-mkey="累计收益率"><div class="text-sm text-slate-500">累计收益率</div><div class="text-2xl font-bold text-emerald-800">${totalReturn.toFixed(2)}%</div></div>
+                <div class="bg-emerald-50 p-4 rounded-lg text-center" data-mkey="XIRR年化"><div class="text-sm text-slate-500">XIRR年化</div><div class="text-2xl font-bold text-emerald-800">${isNaN(xirrVal)?'-':xirrVal.toFixed(2)+'%'}</div></div>
+                <div class="bg-emerald-50 p-4 rounded-lg text-center" data-mkey="年化收益率(时间加权)"><div class="text-sm text-slate-500">年化收益率(时间加权)</div><div class="text-2xl font-bold text-emerald-800">${twrHtml}</div></div>
+                <div class="bg-emerald-50 p-4 rounded-lg text-center" data-mkey="胜率(正收益日占比)"><div class="text-sm text-slate-500">胜率(正收益日占比)</div><div class="text-2xl font-bold text-emerald-800">${winHtml}</div></div>
+
+                ${riskHtml}
+            `;
+
+            if (validDates.length > 0) {
+                document.getElementById('chartFilter').style.display = 'block';
+                document.getElementById('benchmarkSelectorWrapper').style.display = 'flex';
+                const minD = formatDate(validDates[0]), maxD = formatDate(validDates[validDates.length-1]);
+                document.getElementById('chartStartDate').value = minD; document.getElementById('chartStartDate').min = minD; document.getElementById('chartStartDate').max = maxD;
+                document.getElementById('chartEndDate').value = maxD; document.getElementById('chartEndDate').min = minD; document.getElementById('chartEndDate').max = maxD;
+                document.getElementById('chartStartDate').onchange = updateCharts;
+                document.getElementById('chartEndDate').onchange = updateCharts;
+            } else {
+                document.getElementById('benchmarkSelectorWrapper').style.display = 'none';
+            }
+            updateCharts();
+            renderAnalysisTable(); // 确保调用的是异步函数
+            renderProfitProbability();
+            renderCorrelationMatrix();
+        }
+
+        // ============ 盈利概率 & 相关性分析 ============
+
+        // 在 [winStartIdx, winEndIdx] 闭区间（对齐 simDateStrs）内重放全部投资计划，
+        // 返回该窗口的资金加权持有收益与 XIRR 年化；区间内无扣款则返回 null。
+        // 采用“以窗口起点为锚点”的解释：即“假设在历史任意时点开始同一套定投计划并持有 holdDays”。
+        function simulateDcaWindow(winStartIdx, winEndIdx) {
+            const dateStrs = backtestResult.simDateStrs;
+            const simNav = backtestResult.simNav;
+            const simDiv = backtestResult.simDiv;
+            const simDow = backtestResult.simDow;
+            const simDateTs = backtestResult.simDateTs;
+            const simDayOfMonth = backtestResult.simDayOfMonth;
+            if (!dateStrs || !simNav || !simDateTs) return null;
+            const shares = {};
+            let totalCash = 0;
+            const cashFlows = [], flowDates = [];
+            let invested = 0;
+            for (const plan of investmentPlans) {
+                const fund = plan.fund;
+                const navArr = simNav[fund];
+                const divArr = simDiv[fund];
+                if (!navArr) continue;
+                if (shares[fund] === undefined) shares[fund] = 0;
+                for (let k = winStartIdx; k <= winEndIdx; k++) {
+                    const nav = navArr[k];
+                    if (nav === null || nav === undefined) continue;   // 基金尚未成立
+                    const ds = dateStrs[k];
+                    // 分红处理（基于已持有份额）
+                    if (shares[fund] > 0) {
+                        const divPerShare = divArr[k] || 0;
+                        if (divPerShare > 0) {
+                            const totalDiv = shares[fund] * divPerShare;
+                            if (plan.div === 'reinvest') shares[fund] += totalDiv / nav;
+                            else { totalCash += totalDiv; cashFlows.push(totalDiv); flowDates.push(simDateTs[k]); }
+                        }
+                    }
+                    // 扣款判定（以窗口起点为锚）
+                    let shouldInvest = false;
+                    if (plan.type === 'single') { if (k === winStartIdx) shouldInvest = true; }
+                    else if (plan.type === 'weekly') { if (k >= winStartIdx && simDow[k] === 1) shouldInvest = true; }
+                    else if (plan.type === 'monthly') { if (k >= winStartIdx && simDayOfMonth[k] === 1) shouldInvest = true; }
+                    if (shouldInvest) {
+                        shares[fund] += plan.amount / nav;
+                        invested += plan.amount;
+                        cashFlows.push(-plan.amount);
+                        flowDates.push(simDateTs[k]);
+                    }
+                }
+            }
+            if (invested <= 0) return null;
+            let mv = 0;
+            for (const fund of Object.keys(shares)) {
+                const endNav = simNav[fund][winEndIdx];
+                if (endNav !== null && endNav !== undefined) mv += shares[fund] * endNav;
+            }
+            mv += totalCash;
+            const holdingReturn = mv / invested - 1;
+            cashFlows.push(mv);
+            flowDates.push(simDateTs[winEndIdx]);
+            const x = xirr(cashFlows, flowDates);
+            const xirrAnnual = isNaN(x) ? NaN : x;
+            return { holdingReturn, xirrAnnual };
+        }
+
+        // 给定持有期（交易日），按指定口径计算盈利概率、平均持有收益与平均年化收益
+        // mode: 'dca' = 定投模拟（资金加权，推荐）；'twr' = 组合净值（一次性买入，时间加权）
+        function calcProfit(holdDays, mode) {
+            mode = mode || 'dca';
+            const nv = backtestResult.netValues || [];
+            const n = nv.length;
+            if (n <= holdDays) return null;
+            if (mode === 'twr') {
+                let wins = 0, sum = 0, cnt = 0;
+                for (let i = 0; i + holdDays < n; i++) {
+                    const ret = nv[i + holdDays] / nv[i] - 1;
+                    if (isFinite(ret)) { sum += ret; cnt++; if (ret > 0) wins++; }
+                }
+                if (cnt === 0) return null;
+                const avgReturn = sum / cnt;
+                // 时间加权年化：(1+平均持有收益)^(252/holdDays) - 1
+                const avgAnnual = Math.pow(1 + avgReturn, 252 / holdDays) - 1;
+                return { winRate: wins / cnt * 100, avgReturn: avgReturn * 100, avgAnnual: avgAnnual * 100, samples: cnt, annualSamples: cnt };
+            }
+            // 定投模拟口径
+            const startIdx = backtestResult.simStartIdx || 0;
+            let wins = 0, sum = 0, sumAnnual = 0, cnt = 0, annualCnt = 0;
+            for (let i = 0; i + holdDays < n; i++) {
+                const w = simulateDcaWindow(startIdx + i, startIdx + i + holdDays);
+                if (!w) continue;
+                sum += w.holdingReturn; cnt++;
+                if (w.holdingReturn > 0) wins++;
+                if (isFinite(w.xirrAnnual)) { sumAnnual += w.xirrAnnual; annualCnt++; }
+            }
+            if (cnt === 0) return null;
+            return {
+                winRate: wins / cnt * 100,
+                avgReturn: sum / cnt * 100,
+                avgAnnual: annualCnt > 0 ? sumAnnual / annualCnt * 100 : NaN,
+                samples: cnt,
+                annualSamples: annualCnt
+            };
+        }
+
+        function setProfitMode(mode) {
+            if (mode !== 'dca' && mode !== 'twr') return;
+            profitMode = mode;
+            document.getElementById('ppModeDca').className = 'px-3 py-1.5 text-sm ' + (mode === 'dca' ? 'bg-blue-600 text-white' : 'bg-white text-gray-700 hover:bg-gray-100');
+            document.getElementById('ppModeTwr').className = 'px-3 py-1.5 text-sm ' + (mode === 'twr' ? 'bg-blue-600 text-white' : 'bg-white text-gray-700 hover:bg-gray-100');
+            renderProfitProbability();
+        }
+
+        // 批量计算盈利概率（异步分块 + 进度），彻底避免切换口径时主线程阻塞
+        // periods: [{label, days}]，mode: 'dca'（定投模拟）| 'twr'（组合净值）
+        // 返回 results: { [days]: {winRate, avgReturn, avgAnnual, samples, annualSamples} | null }
+        let ppComputeToken = 0;
+        function computeProfitProbabilityAsync(periods, mode, onProgress, onDone) {
+            mode = mode || 'dca';
+            const nv = backtestResult.netValues || [];
+            const n = nv.length;
+            const result = {};
+            periods.forEach(p => { result[p.days] = null; });
+            const validPeriods = periods.filter(p => n > p.days);
+            if (validPeriods.length === 0) { onDone(result); return; }
+
+            // 时间加权（组合净值）口径：O(n) 极快，同步即可
+            if (mode === 'twr') {
+                validPeriods.forEach(p => {
+                    const holdDays = p.days;
+                    let wins = 0, sum = 0, cnt = 0;
+                    for (let i = 0; i + holdDays < n; i++) {
+                        const ret = nv[i + holdDays] / nv[i] - 1;
+                        if (isFinite(ret)) { sum += ret; cnt++; if (ret > 0) wins++; }
+                    }
+                    if (cnt > 0) {
+                        const avgReturn = sum / cnt;
+                        result[p.days] = {
+                            winRate: wins / cnt * 100,
+                            avgReturn: avgReturn * 100,
+                            avgAnnual: (Math.pow(1 + avgReturn, 252 / holdDays) - 1) * 100,
+                            samples: cnt, annualSamples: cnt
+                        };
+                    }
+                });
+                onDone(result);
+                return;
+            }
+
+            // 定投模拟（资金加权）口径：
+            // 关键优化——对每个历史起点只重放一次（覆盖全部持有期），避免不同持有期重复重放（优化项 2）；
+            // 内层使用预缓存时间戳与日份数组，不再 new Date（优化项 1）；分块异步执行并显示进度（优化项 4）。
+            const simNav = backtestResult.simNav, simDiv = backtestResult.simDiv;
+            const simDow = backtestResult.simDow, simDateTs = backtestResult.simDateTs, simDay = backtestResult.simDayOfMonth;
+            const startIdx = backtestResult.simStartIdx || 0;
+            if (!simNav || !simDateTs) { onDone(result); return; }
+            const simLen = startIdx + n; // 等于 allDateStrs.length
+            const maxHold = Math.max.apply(null, validPeriods.map(p => p.days));
+            const minHold = Math.min.apply(null, validPeriods.map(p => p.days));
+            const offsets = validPeriods.map(p => p.days).sort((a, b) => a - b);
+            const acc = {};
+            validPeriods.forEach(p => { acc[p.days] = { wins: 0, sum: 0, sumAnnual: 0, cnt: 0, annualCnt: 0 }; });
+
+            const limit = n - minHold; // 起点循环上界（不含）
+            let i = 0;
+            const BATCH = 150;
+
+            function processStart(S) {
+                const shares = {};
+                for (const plan of investmentPlans) { if (simNav[plan.fund]) shares[plan.fund] = 0; }
+                let totalCash = 0, invested = 0;
+                const cashFlows = [], flowDates = [];
+                const baseK = startIdx + S;
+                const Ek = Math.min(baseK + maxHold, simLen - 1);
+                let offIdx = 0;
+                for (let k = baseK; k <= Ek; k++) {
+                    const dOff = k - baseK;
+                    const dow = simDow[k];
+                    const day = simDay[k];
+                    for (const plan of investmentPlans) {
+                        const fund = plan.fund, navArr = simNav[fund];
+                        if (!navArr) continue;
+                        const nav = navArr[k];
+                        if (nav === null || nav === undefined) continue;
+                        const divArr = simDiv[fund];
+                        if (shares[fund] > 0) {
+                            const divPerShare = divArr ? (divArr[k] || 0) : 0;
+                            if (divPerShare > 0) {
+                                const totalDiv = shares[fund] * divPerShare;
+                                if (plan.div === 'reinvest') shares[fund] += totalDiv / nav;
+                                else { totalCash += totalDiv; cashFlows.push(totalDiv); flowDates.push(simDateTs[k]); }
+                            }
+                        }
+                        let shouldInvest = false;
+                        if (plan.type === 'single') { if (k === baseK) shouldInvest = true; }
+                        else if (plan.type === 'weekly') { if (k >= baseK && dow === 1) shouldInvest = true; }
+                        else if (plan.type === 'monthly') { if (k >= baseK && day === 1) shouldInvest = true; }
+                        if (shouldInvest) {
+                            shares[fund] += plan.amount / nav;
+                            invested += plan.amount;
+                            cashFlows.push(-plan.amount);
+                            flowDates.push(simDateTs[k]);
+                        }
+                    }
+                    while (offIdx < offsets.length && dOff >= offsets[offIdx]) {
+                        const off = offsets[offIdx];
+                        let mv = 0;
+                        for (const fund of Object.keys(shares)) {
+                            const endNav = simNav[fund][k];
+                            if (endNav !== null && endNav !== undefined) mv += shares[fund] * endNav;
+                        }
+                        mv += totalCash;
+                        if (invested > 0) {
+                            const holdingReturn = mv / invested - 1;
+                            if (isFinite(holdingReturn)) {
+                                const a = acc[off];
+                                a.sum += holdingReturn; a.cnt++;
+                                if (holdingReturn > 0) a.wins++;
+                                cashFlows.push(mv); flowDates.push(simDateTs[k]);
+                                const x = xirr(cashFlows, flowDates);
+                                cashFlows.pop(); flowDates.pop();
+                                if (isFinite(x)) { a.sumAnnual += x; a.annualCnt++; }
+                            }
+                        }
+                        offIdx++;
+                    }
+                }
+            }
+
+            function step() {
+                const end = Math.min(i + BATCH, limit);
+                for (; i < end; i++) processStart(i);
+                if (onProgress) onProgress(limit > 0 ? i / limit : 1);
+                if (i < limit) setTimeout(step, 0);
+                else {
+                    validPeriods.forEach(p => {
+                        const a = acc[p.days];
+                        if (a.cnt > 0) {
+                            result[p.days] = {
+                                winRate: a.wins / a.cnt * 100,
+                                avgReturn: a.sum / a.cnt * 100,
+                                avgAnnual: a.annualCnt > 0 ? a.sumAnnual / a.annualCnt * 100 : NaN,
+                                samples: a.cnt, annualSamples: a.annualCnt
+                            };
+                        }
+                    });
+                    onDone(result);
+                }
+            }
+            step();
+        }
+
+        function renderProfitProbability() {
+            const sec = document.getElementById('profitProbabilitySection');
+            const tbl = document.getElementById('profitProbabilityTable');
+            const nv = backtestResult.netValues || [];
+            if (!nv || nv.length === 0) { sec.style.display = 'none'; return; }
+            const basePeriods = [
+                { label: '满6月', days: 126 },
+                { label: '满1年', days: 252 },
+                { label: '满2年', days: 504 },
+                { label: '满3年', days: 756 }
+            ];
+            const custom = customPeriods.map(y => ({ label: y + '年', days: Math.max(1, Math.round(y * 252)) }));
+            const all = basePeriods.concat(custom);
+
+            // 先显示加载态（含进度），再异步计算，避免同步计算冻结 UI（优化项 4）
+            const token = ++ppComputeToken;
+            tbl.innerHTML = '<div class="p-8 text-center text-gray-500">盈利概率计算中… <span id="ppProg" class="font-medium text-blue-600"></span></div>';
+            sec.style.display = 'block';
+
+            computeProfitProbabilityAsync(all, profitMode, (prog) => {
+                if (token !== ppComputeToken) return;
+                const el = document.getElementById('ppProg');
+                if (el) el.textContent = Math.round(prog * 100) + '%';
+            }, (results) => {
+                if (token !== ppComputeToken) return; // 已有更新的计算，丢弃旧结果
+                let rows = '', any = false;
+                all.forEach(p => {
+                    const r = results[p.days];
+                    if (!r) {
+                        rows += `<tr><td class="px-4 py-3 border-b font-medium">${p.label}</td><td class="px-4 py-3 border-b text-center text-gray-400" colspan="3">数据不足</td></tr>`;
+                        return;
+                    }
+                    any = true;
+                    const retColor = r.avgReturn >= 0 ? 'text-red-600 font-semibold' : 'text-green-600 font-semibold';
+                    const retSign = r.avgReturn >= 0 ? '+' : '';
+                    const annColor = (!isFinite(r.avgAnnual)) ? 'text-gray-400'
+                        : (r.avgAnnual >= 0 ? 'text-red-600 font-semibold' : 'text-green-600 font-semibold');
+                    const annText = isFinite(r.avgAnnual) ? (r.avgAnnual >= 0 ? '+' : '') + r.avgAnnual.toFixed(2) + '%' : '—';
+                    const annNote = (!isFinite(r.avgAnnual) && r.annualSamples === 0) ? ' <span class="text-xs text-gray-400">(年化数据不足)</span>' : '';
+                    const wr = r.winRate;
+                    rows += `<tr>
+                        <td class="px-4 py-3 border-b font-medium text-center whitespace-nowrap">${p.label}</td>
+                        <td class="px-4 py-3 border-b text-center whitespace-nowrap ${retColor}">${retSign}${r.avgReturn.toFixed(2)}%</td>
+                        <td class="px-4 py-3 border-b text-center whitespace-nowrap ${annColor}">${annText}${annNote}</td>
+                        <td class="px-4 py-3 border-b">
+                            <div class="flex items-center gap-2">
+                                <div class="flex-1 bg-gray-100 rounded-full h-3 overflow-hidden">
+                                    <div class="h-3 rounded-full" style="width:${wr.toFixed(1)}%;background:linear-gradient(90deg,#3b82f6,#2563eb);"></div>
+                                </div>
+                                <span class="text-sm font-semibold text-blue-700 w-14 text-right">${wr.toFixed(1)}%</span>
+                            </div>
+                            <div class="text-xs text-gray-400 mt-1">样本数 ${r.samples}</div>
+                        </td>
+                    </tr>`;
+                });
+                if (!any) { sec.style.display = 'none'; return; }
+                const modeLabel = profitMode === 'dca' ? '定投模拟（资金加权，按计划规则在历史任意时点起投）' : '组合净值（一次性买入，时间加权）';
+                const ppDefaultWidths = ['14%', '14%', '16%'];
+                const ppHeaders = ['持有时长', '平均收益', '年化收益率'];
+                let ppHeadHtml = '';
+                ppHeaders.forEach((h, i) => {
+                    const w = colWidths[i] ? colWidths[i] + 'px' : ppDefaultWidths[i];
+                    ppHeadHtml += `<th class="px-4 py-2 border-b text-center whitespace-nowrap" style="width:${w}">${h}</th>`;
+                });
+                ppHeadHtml += '<th class="px-4 py-2 border-b text-center">盈利概率</th>';
+                tbl.innerHTML = '<table class="min-w-full bg-white border border-gray-200 rounded-lg text-sm" style="table-layout:fixed;width:100%"><thead class="bg-gray-100"><tr>' +
+                    ppHeadHtml + '</tr></thead><tbody>' +
+                    rows + '</tbody></table>' +
+                    `<p class="text-xs text-gray-400 mt-3">当前口径：${modeLabel}。盈利概率、平均收益与年化收益率均为历史业绩数据测算，不代表未来收益。</p>`;
+                enableColumnResize(tbl.querySelector('table'));
+                sec.style.display = 'block';
+            });
+        }
+
+        // 前三列手动拖拽调宽（拖表头右边界）。colWidths 为 null 时用默认百分比，否则用已保存的像素宽。
+        let colWidths = [null, null, null];
+        function enableColumnResize(table) {
+            if (!table) return;
+            const ths = table.querySelectorAll('thead th');
+            ths.forEach((th, idx) => {
+                if (idx >= 3) return; // 仅前三列可拖拽
+                th.style.position = 'relative';
+                let handle = th.querySelector('.col-resize-handle');
+                if (!handle) {
+                    handle = document.createElement('span');
+                    handle.className = 'col-resize-handle';
+                    handle.style.cssText = 'position:absolute;right:0;top:0;height:100%;width:7px;cursor:col-resize;user-select:none;z-index:5;';
+                    th.appendChild(handle);
+                }
+                handle.onmousedown = function (e) {
+                    e.preventDefault();
+                    e.stopPropagation();
+                    const startX = e.clientX;
+                    const startW = th.offsetWidth;
+                    th.style.width = startW + 'px'; // 锁定为像素，便于平滑拖拽
+                    document.body.style.cursor = 'col-resize';
+                    document.body.style.userSelect = 'none';
+                    function onMove(ev) {
+                        const newW = Math.max(48, startW + (ev.clientX - startX));
+                        th.style.width = newW + 'px';
+                    }
+                    function onUp() {
+                        document.removeEventListener('mousemove', onMove);
+                        document.removeEventListener('mouseup', onUp);
+                        document.body.style.cursor = '';
+                        document.body.style.userSelect = '';
+                        colWidths[idx] = th.offsetWidth; // 记存，重算后保持
+                    }
+                    document.addEventListener('mousemove', onMove);
+                    document.addEventListener('mouseup', onUp);
+                };
+            });
+        }
+
+        function addCustomPeriod() {
+            const v = parseFloat(document.getElementById('customHoldYears').value);
+            if (!(v > 0)) { alert('请输入大于 0 的持有年数'); return; }
+            if (!customPeriods.includes(v)) customPeriods.push(v);
+            renderProfitProbability();
+        }
+        function clearCustomPeriods() {
+            customPeriods = [];
+            renderProfitProbability();
+        }
+
+        // 基金简称截断（超长加省略号，全称通过 title 显示）
+        function shortName(name, max) {
+            max = max || 8;
+            if (!name) return '';
+            return name.length > max ? name.slice(0, max) + '…' : name;
+        }
+
+        // 相关系数 -> 颜色（正相关红系、负相关绿系、0 附近白）
+        function corrColor(c) {
+            if (c >= 0) {
+                const t = c;
+                const r = Math.round(255 - t * 39);
+                const g = Math.round(255 - t * 207);
+                const b = Math.round(255 - t * 216);
+                return { bg: `rgb(${r},${g},${b})`, fg: t > 0.55 ? '#fff' : '#333' };
+            } else {
+                const t = -c;
+                const r = Math.round(255 - t * 229);
+                const g = Math.round(255 - t * 103);
+                const b = Math.round(255 - t * 175);
+                return { bg: `rgb(${r},${g},${b})`, fg: t > 0.55 ? '#fff' : '#333' };
+            }
+        }
+
+        function pearson(a, b) {
+            const n = a.length;
+            let sa = 0, sb = 0;
+            for (let i = 0; i < n; i++) { sa += a[i]; sb += b[i]; }
+            const ma = sa / n, mb = sb / n;
+            let cov = 0, va = 0, vb = 0;
+            for (let i = 0; i < n; i++) {
+                const da = a[i] - ma, db = b[i] - mb;
+                cov += da * db; va += da * da; vb += db * db;
+            }
+            if (va === 0 || vb === 0) return NaN;
+            return cov / Math.sqrt(va * vb);
+        }
+
+        function renderCorrelationMatrix() {
+            const sec = document.getElementById('correlationSection');
+            const tbl = document.getElementById('correlationTable');
+            const legend = document.getElementById('correlationLegend');
+            const codes = [...new Set(investmentPlans.map(p => p.fund))];
+            if (codes.length === 0) { sec.style.display = 'none'; return; }
+
+            // 每只基金：日期 -> 日收益率
+            const retMaps = {};
+            codes.forEach(code => {
+                const f = fundsData[code];
+                if (!f) return;
+                const m = new Map();
+                for (let i = 1; i < f.dates.length; i++) {
+                    const nav0 = f.nav[i - 1], nav1 = f.nav[i];
+                    if (nav0 > 0 && nav1 > 0) m.set(formatDate(f.dates[i]), nav1 / nav0 - 1);
+                }
+                retMaps[code] = m;
+            });
+
+            // 共同交易日交集
+            let common = null;
+            codes.forEach(code => {
+                const m = retMaps[code];
+                if (!m) return;
+                const keys = new Set(m.keys());
+                common = common === null ? keys : new Set([...common].filter(k => keys.has(k)));
+            });
+            if (!common || common.size < 3) { sec.style.display = 'none'; return; }
+
+            const commonArr = Array.from(common).sort();
+            const series = {};
+            codes.forEach(code => {
+                const m = retMaps[code];
+                series[code] = commonArr.map(d => m.get(d));
+            });
+
+            const circle = ['①', '②', '③', '④', '⑤', '⑥', '⑦', '⑧', '⑨', '⑩'];
+            const labels = codes.map(code => fundCodeName(code));
+
+            let headerCells = '<th class="px-3 py-2 border-b text-center"></th>' +
+                codes.map((code, i) => `<th class="px-3 py-2 border-b text-center" title="${labels[i].name}">${circle[i] || (i + 1)}<div class="text-xs font-normal text-gray-500">${shortName(labels[i].name)}</div></th>`).join('');
+
+            let body = '';
+            codes.forEach((codeA, i) => {
+                let cells = `<td class="px-3 py-2 border-b text-center font-medium" title="${labels[i].name}">${circle[i] || (i + 1)} <span class="text-xs text-gray-500">${shortName(labels[i].name)}</span></td>`;
+                codes.forEach((codeB, j) => {
+                    const c = (i === j) ? 1 : pearson(series[codeA], series[codeB]);
+                    if (isNaN(c)) { cells += '<td class="px-3 py-2 border-b text-center text-gray-400">-</td>'; return; }
+                    const col = corrColor(c);
+                    const txt = (c >= 0 ? '+' : '') + c.toFixed(2);
+                    cells += `<td class="px-3 py-2 border-b text-center font-medium" style="background:${col.bg};color:${col.fg};">${txt}</td>`;
+                });
+                body += `<tr>${cells}</tr>`;
+            });
+
+            tbl.innerHTML = '<table class="min-w-full bg-white border border-gray-200 rounded-lg text-sm"><thead class="bg-gray-100"><tr>' +
+                headerCells + '</tr></thead><tbody>' + body + '</tbody></table>';
+            legend.innerHTML = '<div class="flex items-center gap-3"><span class="text-sm font-medium text-gray-600">+1.00</span>' +
+                '<div class="flex-1 h-4 rounded" style="background:linear-gradient(90deg, rgb(216,48,39), #ffffff, rgb(26,152,80));"></div>' +
+                '<span class="text-sm font-medium text-gray-600">-1.00</span></div>' +
+                '<div class="text-xs text-gray-400 mt-1">颜色越红代表正相关越强，越绿代表负相关越强。</div>';
+            sec.style.display = 'block';
+        }
+
+        // 更新图表（基准对齐至组合起点）
+        async function updateCharts() {
+            const startDate = new Date(document.getElementById('chartStartDate').value);
+            const endDate = new Date(document.getElementById('chartEndDate').value);
+            const filtered = backtestResult.dates.map((d,i)=>({date:d, asset:backtestResult.assets[i], nv:backtestResult.netValues[i]}))
+                .filter(item => item.date >= startDate && item.date <= endDate);
+            const chartDates = filtered.map(d => formatDate(d.date));
+            const chartAssets = filtered.map(d => d.asset);
+            const chartNetValues = filtered.map(d => d.nv);
+
+            let benchmarkDataset = null;
+            if (currentBenchmarkId && filtered.length > 0) {
+                const benchmark = await db.benchmarks.get(currentBenchmarkId);
+                if (benchmark && benchmark.data.length > 0) {
+                    const bmMap = new Map(benchmark.data.map(d => [d.date, d.nav]));
+                    
+                    // 构建原始基准净值序列（按图表日期）
+                    const rawBenchValues = [];
+                    for (let d of filtered.map(f=>f.date)) {
+                        const dateStr = formatDate(d);
+                        const nav = bmMap.get(dateStr);
+                        rawBenchValues.push(nav !== undefined ? nav : null);
+                    }
+                    
+                    // 前向填充缺失值
+                    for (let i = 1; i < rawBenchValues.length; i++) {
+                        if (rawBenchValues[i] === null) rawBenchValues[i] = rawBenchValues[i-1];
+                    }
+                    
+                    // 找到第一个有效的基准净值及其索引
+                    let firstValidIdx = -1;
+                    let firstBenchNav = null;
+                    for (let i = 0; i < rawBenchValues.length; i++) {
+                        if (rawBenchValues[i] !== null) {
+                            firstValidIdx = i;
+                            firstBenchNav = rawBenchValues[i];
+                            break;
+                        }
+                    }
+                    
+                    if (firstValidIdx !== -1) {
+                        // 获取对应日期的组合净值
+                        const firstNetValue = chartNetValues[firstValidIdx];
+                        
+                        // 计算缩放比例（若组合净值有效）
+                        if (firstNetValue && firstBenchNav > 0) {
+                            const scale = firstNetValue / firstBenchNav;
+                            
+                            // 生成缩放后的基准序列（缺失值填 null，绘图时 Chart.js 会忽略）
+                            const scaledBenchValues = rawBenchValues.map(v => v !== null ? v * scale : null);
+                            
+                            benchmarkDataset = {
+                                label: benchmark.name + ' (比较基准)',
+                                data: scaledBenchValues,
+                                borderColor: '#f97316',
+                                backgroundColor: 'transparent',
+                                borderDash: [5,5],
+                                borderWidth: 2,
+                                pointRadius: 0,
+                                tension: 0.1,
+                                spanGaps: false  // 不连接缺失段
+                            };
+                        }
+                    }
+                }
+            }
+
+
+            // 组合净值数据
+            const startNetValue = chartNetValues.length > 0 ? chartNetValues[0] : 1.0;
+            
+            // 准备数据集（显式绑定 yAxisID）
+            const netDatasets = [{
+                label: '组合净值',
+                data: chartNetValues,
+                borderColor: '#10b981',
+                backgroundColor: 'rgba(16,185,129,0.1)',
+                fill: true,
+                tension: 0.1,
+                pointRadius: 0,
+                pointHoverRadius: 6,
+                yAxisID: 'y'
+            }];
+            
+            if (benchmarkDataset) {
+                benchmarkDataset.yAxisID = 'y';
+                netDatasets.push(benchmarkDataset);
+            }
+
+            // 计算所有数据的最小/最大值（用于右侧轴对齐）
+            const allNumericValues = chartNetValues.concat(
+                benchmarkDataset ? benchmarkDataset.data.filter(v => v !== null && !isNaN(v)) : []
+            );
+            const minVal = Math.min(...allNumericValues);
+            const maxVal = Math.max(...allNumericValues);
+            const padding = (maxVal - minVal) * 0.05; // 5% 边距
+
+            // 销毁旧图表
+            const netCtx = document.getElementById('netValueChart').getContext('2d');
+            if (netValueChart) netValueChart.destroy();
+
+            netValueChart = new Chart(netCtx, {
+                type: 'line',
+                data: { labels: chartDates, datasets: netDatasets },
+                options: {
+                    responsive: true,
+                    interaction: { mode: 'index', intersect: false },
+                    plugins: {
+                        tooltip: { 
+                            mode: 'index',
+                            callbacks: {
+                                label: function(context) {
+                                    return context.dataset.label + ': ' + context.parsed.y.toFixed(4);// 显示精度到0.0001
+                                }
+                            }
+                        },
+                        legend: { labels: { usePointStyle: true } }
+                    },
+                    scales: {
+                        x: { ticks: { maxTicksLimit: 15 } },
+                        y: {
+                            beginAtZero: false,
+                            position: 'left',
+                            title: { 
+                                display: true, 
+                                text: `净值 (起始日 ${startNetValue.toFixed(4)})` 
+                            },
+                            min: minVal - padding,
+                            max: maxVal + padding,
+                            ticks: {
+                                callback: function(value) {
+                                    return value.toFixed(4);
+                                }
+                            }
+                        },
+                        y1: {
+                            position: 'right',
+                            title: { display: true, text: '相对起始日涨跌 (%)' },
+                            grid: { drawOnChartArea: false },
+                            min: minVal - padding,
+                            max: maxVal + padding,
+                            ticks: {
+                                callback: function(value) {
+                                    if (!startNetValue || startNetValue === 0) return '';
+                                    const percent = ((value - startNetValue) / startNetValue) * 100;
+                                    return percent.toFixed(1) + '%';
+                                }
+                            }
+                        }
+                    }
+                }
+            });
+
+            const assetCtx = document.getElementById('assetChart').getContext('2d');
+            if (assetChart) assetChart.destroy();
+            assetChart = new Chart(assetCtx, {
+                type: 'line', data: { labels: chartDates, datasets: [{
+                    label: '总资产', data: chartAssets, borderColor: '#3b82f6',
+                    backgroundColor: 'rgba(59,130,246,0.1)', fill: true, tension: 0.1, pointRadius: 0
+                }] },
+                options: {
+                    responsive: true, interaction: { mode: 'index' },
+                    scales: { x: { ticks: { maxTicksLimit: 15 } } }
+                }
+            });
+
+            renderAnalysisTable();
+            renderPeriodMetrics();
+        }
+
+        // 渲染「选定区间投资表现」指标卡（复用与整体相同的算法口径，仅作用于所选日期窗口）
+        function renderPeriodMetrics() {
+            const section = document.getElementById('periodMetricsSection');
+            const el = document.getElementById('periodMetrics');
+            const labelEl = document.getElementById('periodRangeLabel');
+            if (!el) return;
+            if (!backtestResult.dates || backtestResult.dates.length === 0) { if (section) section.style.display = 'none'; return; }
+            if (section) section.style.display = 'block';
+            const startStr = document.getElementById('chartStartDate').value;
+            const endStr = document.getElementById('chartEndDate').value;
+            if (!startStr || !endStr) return;
+            const startDate = new Date(startStr), endDate = new Date(endStr);
+            const dates = backtestResult.dates;
+            let i0 = -1, i1 = -1;
+            for (let i = 0; i < dates.length; i++) {
+                if (i0 === -1 && dates[i] >= startDate) i0 = i;
+                if (dates[i] <= endDate) i1 = i;
+            }
+            if (i0 === -1) i0 = 0;
+            if (i1 === -1) i1 = dates.length - 1;
+            if (i1 < i0) i1 = i0;
+            const nvs = backtestResult.netValues.slice(i0, i1 + 1);
+            const assets = backtestResult.assets.slice(i0, i1 + 1);
+            const invests = (backtestResult.invests || []).slice(i0, i1 + 1);
+            const cashDivs = backtestResult.cashDivs || [];
+            const wDates = dates.slice(i0, i1 + 1);
+            const n = nvs.length;
+            const windowDays = (dates[i1] - dates[i0]) / 86400000;
+
+            // 快照类（区间口径）
+            const intervalPrincipal = invests.reduce((a, b) => a + (b || 0), 0);
+            const mvEnd = assets[n - 1] - (cashDivs[i1] || 0);
+            const cashDivInterval = (cashDivs[i1] || 0) - (i0 > 0 ? (cashDivs[i0 - 1] || 0) : 0);
+            const totalAssetEnd = assets[n - 1];
+
+            // 收益类
+            let cumReturn = NaN, xirrValInterval = NaN, annualReturnTwr = NaN, winRate = NaN;
+            if (n >= 2 && nvs[0] > 0) {
+                cumReturn = nvs[n - 1] / nvs[0] - 1;
+                if (windowDays > 0) {
+                    annualReturnTwr = Math.pow(nvs[n - 1] / nvs[0], 365 / windowDays) - 1;
+                    // 区间 XIRR：首日资产为初始投入，区间内后续每笔定投为追加投入，末日资产为回收
+                    const flows = [ -assets[0] ], flowDates = [ dates[i0] ];
+                    for (let j = i0 + 1; j <= i1; j++) { flows.push(-invests[j - i0]); flowDates.push(dates[j]); }
+                    flows.push(assets[n - 1]); flowDates.push(dates[i1]);
+                    xirrValInterval = xirr(flows, flowDates) * 100;
+                }
+                const dailyReturns = [];
+                for (let i = 1; i < n; i++) dailyReturns.push((nvs[i] - nvs[i - 1]) / nvs[i - 1]);
+                winRate = dailyReturns.length ? dailyReturns.filter(r => r > 0).length / dailyReturns.length * 100 : NaN;
+            }
+            const twrHtml = isNaN(annualReturnTwr) ? '-' : (annualReturnTwr * 100).toFixed(2) + '%';
+            const winHtml = isNaN(winRate) ? '-' : winRate.toFixed(1) + '%';
+            const cumHtml = isNaN(cumReturn) ? '-' : (cumReturn * 100).toFixed(2) + '%';
+
+            // 风险类
+            let riskHtml;
+            if (n >= MIN_TRADE_DAYS) {
+                const dailyReturns = [];
+                for (let i = 1; i < n; i++) dailyReturns.push((nvs[i] - nvs[i - 1]) / nvs[i - 1]);
+                const mean = dailyReturns.reduce((a, b) => a + b, 0) / dailyReturns.length;
+                const variance = dailyReturns.reduce((a, b) => a + Math.pow(b - mean, 2), 0) / dailyReturns.length;
+                const annualVolatility = Math.sqrt(variance) * Math.sqrt(252);
+                let peak = nvs[0], maxDrawdown = 0;
+                for (const v of nvs) { if (v > peak) peak = v; const dd = (v - peak) / peak; if (dd < maxDrawdown) maxDrawdown = dd; }
+                maxDrawdown *= 100;
+                let sharpeRatio = NaN, calmarRatio = NaN;
+                if (annualVolatility > 0) sharpeRatio = (annualReturnTwr - RISK_FREE_RATE) / annualVolatility;
+                if (maxDrawdown !== 0) calmarRatio = annualReturnTwr / Math.abs(maxDrawdown / 100);
+                let peakV = nvs[0], ddFrom = null, maxSpan = 0;
+                for (let i = 0; i < n; i++) {
+                    if (nvs[i] > peakV) { peakV = nvs[i]; ddFrom = null; }
+                    else if (nvs[i] < peakV) {
+                        if (ddFrom === null) ddFrom = i;
+                        const span = (wDates[i] - wDates[ddFrom]) / 86400000;
+                        if (span > maxSpan) maxSpan = span;
+                    }
+                }
+                riskHtml = `
+                    <div class="bg-red-50 p-4 rounded-lg text-center" data-mkey="最大回撤"><div class="text-sm text-slate-500">最大回撤</div><div class="text-2xl font-bold text-red-700">${maxDrawdown.toFixed(2)}%</div></div>
+                    <div class="bg-red-50 p-4 rounded-lg text-center" data-mkey="回撤持续天数"><div class="text-sm text-slate-500">回撤持续天数</div><div class="text-2xl font-bold text-red-700">${maxSpan.toFixed(0)} 天</div></div>
+                    <div class="bg-red-50 p-4 rounded-lg text-center" data-mkey="年化波动率"><div class="text-sm text-slate-500">年化波动率</div><div class="text-2xl font-bold text-red-700">${(annualVolatility * 100).toFixed(2)}%</div></div>
+                    <div class="bg-red-50 p-4 rounded-lg text-center" data-mkey="夏普/卡玛"><div class="text-sm text-slate-500">夏普/卡玛</div><div class="text-2xl font-bold text-red-700">${isNaN(sharpeRatio) ? '-' : sharpeRatio.toFixed(2)}/${isNaN(calmarRatio) ? '-' : calmarRatio.toFixed(2)}</div></div>
+                `;
+            } else {
+                riskHtml = `<div class="bg-gray-100 p-4 rounded-lg text-center col-span-4" data-mkey="风险指标"><div class="text-sm text-gray-600">风险指标</div><div class="text-xl font-medium text-gray-500">区间交易日不足${MIN_TRADE_DAYS}个，以下指标暂不可用</div></div>`;
+            }
+
+            el.innerHTML = `
+                <div class="bg-sky-50 p-4 rounded-lg text-center" data-mkey="区间投入本金"><div class="text-sm text-slate-500">区间投入本金</div><div class="text-2xl font-bold text-sky-700">${intervalPrincipal.toFixed(2)} 元</div></div>
+                <div class="bg-sky-50 p-4 rounded-lg text-center" data-mkey="区间期末市值"><div class="text-sm text-slate-500">区间期末市值</div><div class="text-2xl font-bold text-sky-700">${mvEnd.toFixed(2)} 元</div></div>
+                <div class="bg-sky-50 p-4 rounded-lg text-center" data-mkey="区间现金分红"><div class="text-sm text-slate-500">区间现金分红</div><div class="text-2xl font-bold text-sky-700">${cashDivInterval.toFixed(2)} 元</div></div>
+                <div class="bg-sky-50 p-4 rounded-lg text-center" data-mkey="区间期末总资产"><div class="text-sm text-slate-500">区间期末总资产</div><div class="text-2xl font-bold text-sky-700">${totalAssetEnd.toFixed(2)} 元</div></div>
+
+                <div class="bg-green-50 p-4 rounded-lg text-center" data-mkey="区间累计收益率"><div class="text-sm text-slate-500">区间累计收益率</div><div class="text-2xl font-bold text-green-700">${cumHtml}</div></div>
+                <div class="bg-green-50 p-4 rounded-lg text-center" data-mkey="区间XIRR年化"><div class="text-sm text-slate-500">区间XIRR年化</div><div class="text-2xl font-bold text-green-700">${isNaN(xirrValInterval) ? '-' : xirrValInterval.toFixed(2) + '%'}</div></div>
+                <div class="bg-green-50 p-4 rounded-lg text-center" data-mkey="区间年化收益率(时间加权)"><div class="text-sm text-slate-500">区间年化收益率(时间加权)</div><div class="text-2xl font-bold text-green-700">${twrHtml}</div></div>
+                <div class="bg-green-50 p-4 rounded-lg text-center" data-mkey="区间胜率(正收益日占比)"><div class="text-sm text-slate-500">区间胜率(正收益日占比)</div><div class="text-2xl font-bold text-green-700">${winHtml}</div></div>
+
+                ${riskHtml}
+            `;
+            if (labelEl) labelEl.textContent = `（${startStr} ~ ${endStr}，共 ${n} 个交易日）`;
+        }
+
+        // ============ 指标卡悬停解释 ============
+        const METRIC_TIPS = {
+            "总投入本金": "回测区间内实际投入的所有资金（定投扣款+一次性买入），不含分红再投。即你的成本基数。",
+            "持仓市值": "期末仍持有的份额 × 最新净值，不含已到手现金分红。",
+            "累计现金分红": "累计收到的、未再投的现金分红；红利再投模式下为 0。",
+            "总资产": "持仓市值 + 累计现金分红，即组合上的全部家当。",
+            "累计收益率": "资金加权口径：(总资产 ÷ 本金 − 1)。<br>正数代表整体实际赚钱。",
+            "XIRR年化": "把每笔投入/分红/市值都当作现金流，算考虑时间权重的年化内部收益率。<br>早投的钱权重更高，比累计收益率更公平。",
+            "年化收益率(时间加权)": "把组合净值序列年化（剔除你的投入节奏），反映“组合本身”的赚钱能力。",
+            "胜率(正收益日占比)": "上涨交易日数 ÷ 总交易日数，越高说明日子大多在涨。",
+            "最大回撤": "净值从最高点到最低点的最大跌幅(%)，越大代表最坏情况越惨。",
+            "回撤持续天数": "最长一次从顶部跌下、再回到新高所经历的天数，越久越磨人。",
+            "年化波动率": "日收益波动 × √252，衡量价格颠簸程度，越大越刺激。",
+            "夏普/卡玛": "夏普=(年化收益−无风险利率)÷波动率；<br>卡玛=年化收益÷最大回撤。<br>两个都是越高越好。",
+            "区间投入本金": "选定图表区间内实际投入的资金（定投+一次性买入），不含分红再投。",
+            "区间期末市值": "区间期末仍持有的份额 × 区间末净值，不含已到手现金分红。",
+            "区间现金分红": "该区间内新收到的、未再投的现金分红。",
+            "区间期末总资产": "区间期末市值 + 区间内累计现金分红。",
+            "区间累计收益率": "时间加权口径：区间末净值 ÷ 区间初净值 − 1。<br>注意与上方“累计收益率”(资金加权)口径不同，不要直接横比。",
+            "区间XIRR年化": "把区间内每笔投入/分红/期末资产当作现金流，算考虑时间权重的年化收益。",
+            "区间年化收益率(时间加权)": "把区间净值序列年化（剔除投入节奏），反映区间窗口内组合本身的赚钱能力。",
+            "区间胜率(正收益日占比)": "该区间内上涨交易日数 ÷ 区间交易日数。",
+            "风险指标": "本金/市值类指标不在此列，这里只解释下方的回撤、波动率等风险项。"
+        };
+
+        function initMetricTooltip() {
+            // 注入浮层样式
+            const style = document.createElement('style');
+            style.textContent = `
+            #metricTip{position:fixed;z-index:9999;max-width:300px;background:#1f2937;color:#f3f4f6;
+            font-size:12px;line-height:1.6;padding:8px 11px;border-radius:8px;pointer-events:none;
+            box-shadow:0 6px 20px rgba(0,0,0,.28);display:none;white-space:normal;}
+            #metricTip b{color:#fbbf24;}`;
+            document.head.appendChild(style);
+
+            const tip = document.createElement('div');
+            tip.id = 'metricTip';
+            document.body.appendChild(tip);
+
+            ['metrics', 'periodMetrics'].forEach(id => {
+                const box = document.getElementById(id);
+                if (!box) return;
+                box.addEventListener('mouseover', e => {
+                    const cell = e.target.closest('[data-mkey]');
+                    if (!cell) { tip.style.display = 'none'; return; }
+                    const key = cell.dataset.mkey;
+                    const txt = METRIC_TIPS[key];
+                    if (!txt) { tip.style.display = 'none'; return; }
+                    tip.innerHTML = '<b>' + key + '</b><br>' + txt;
+                    tip.style.display = 'block';
+                });
+                box.addEventListener('mousemove', e => {
+                    if (tip.style.display === 'block') {
+                        let x = e.clientX + 14, y = e.clientY + 14;
+                        const r = tip.getBoundingClientRect();
+                        if (x + r.width > window.innerWidth) x = e.clientX - r.width - 14;
+                        if (y + r.height > window.innerHeight) y = e.clientY - r.height - 14;
+                        tip.style.left = x + 'px';
+                        tip.style.top = y + 'px';
+                    }
+                });
+                box.addEventListener('mouseout', e => {
+                    if (!e.relatedTarget || !e.relatedTarget.closest('[data-mkey]')) tip.style.display = 'none';
+                });
+            });
+        }
+
+        // 绑定事件（放在页面加载完成后）
+        document.addEventListener('DOMContentLoaded', function() {
+            const clearBtn = document.getElementById('clearAllBenchmarksBtn');
+            if (clearBtn) {
+                clearBtn.addEventListener('click', clearAllBenchmarks);
+            }
+            initMetricTooltip();
+        });
+
+        // 渲染关键节点分析表格（修正版：四个固定节点）
+        async function renderAnalysisTable() {
+            const validDates = backtestResult.dates;
+            const netValues = backtestResult.netValues;
+            if (validDates.length === 0 || netValues.length === 0) return;
+
+            // 1. 获取四个关键日期
+            const firstInvestmentDate = validDates[0]; // 第一笔投资日
+            const latestPortfolioDate = validDates[validDates.length-1]; // 组合最新日
+            
+            const chartStartInput = document.getElementById('chartStartDate');
+            const chartEndInput = document.getElementById('chartEndDate');
+            const chartStartDate = chartStartInput?.value ? new Date(chartStartInput.value) : null;
+            const chartEndDate = chartEndInput?.value ? new Date(chartEndInput.value) : null;
+            
+            // 确保图表日期在有效范围内
+            const adjustedChartStartDate = chartStartDate && chartStartDate >= validDates[0] && chartStartDate <= validDates[validDates.length-1] 
+                ? chartStartDate : validDates[0];
+            const adjustedChartEndDate = chartEndDate && chartEndDate >= validDates[0] && chartEndDate <= validDates[validDates.length-1] 
+                ? chartEndDate : validDates[validDates.length-1];
+
+            // 2. 获取选中的基准数据
+            let benchmarkData = null;
+            if (currentBenchmarkId) {
+                const bm = await db.benchmarks.get(currentBenchmarkId);
+                benchmarkData = bm ? bm.data : null;
+            }
+
+            // 辅助函数：在 validDates 中找到与targetDate最接近的索引
+            const getIndexForDate = (targetDate) => {
+                if (!targetDate) return -1;
+                // 找到小于等于targetDate的最大日期索引
+                for (let i = validDates.length - 1; i >= 0; i--) {
+                    if (validDates[i] <= targetDate) return i;
+                }
+                return 0; // 如果所有日期都大于targetDate，返回第一个
+            };
+
+            // 3. 构建四个节点
+            const nodeConfigs = [
+                { 
+                    name: '第一笔投资', 
+                    date: firstInvestmentDate,
+                    getIndex: () => 0 // 总是第一个索引
+                },
+                { 
+                    name: '图表开始', 
+                    date: adjustedChartStartDate,
+                    getIndex: () => getIndexForDate(adjustedChartStartDate)
+                },
+                { 
+                    name: '图表结束', 
+                    date: adjustedChartEndDate,
+                    getIndex: () => getIndexForDate(adjustedChartEndDate)
+                },
+                { 
+                    name: '组合最新', 
+                    date: latestPortfolioDate,
+                    getIndex: () => validDates.length - 1 // 总是最后一个索引
+                }
+            ];
+
+            // 4. 计算节点索引，处理重叠
+            const nodes = [];
+            const seenIndices = new Set();
+            
+            for (const config of nodeConfigs) {
+                const idx = config.getIndex();
+                if (idx >= 0 && idx < validDates.length) {
+                    if (seenIndices.has(idx)) {
+                        // 如果索引已存在，合并节点名称
+                        const existingNode = nodes.find(n => n.idx === idx);
+                        if (existingNode) {
+                            existingNode.names.push(config.name);
+                        }
+                    } else {
+                        nodes.push({
+                            idx: idx,
+                            date: validDates[idx],
+                            names: [config.name]
+                        });
+                        seenIndices.add(idx);
+                    }
+                }
+            }
+
+            // 按时间顺序排序节点
+            nodes.sort((a, b) => a.idx - b.idx);
+
+            if (nodes.length === 0) return;
+
+            // 5. 计算基准归一化参数
+            let bmMap = null;
+            let firstValidBenchNav = null;
+            let firstValidBenchIdx = -1;
+            
+            if (benchmarkData) {
+                bmMap = new Map(benchmarkData.map(d => [d.date, d.nav]));
+                
+                // 找到第一个有效的基准净值（在validDates范围内）
+                for (let i = 0; i < validDates.length; i++) {
+                    const dateStr = formatDate(validDates[i]);
+                    const nav = bmMap.get(dateStr);
+                    if (nav !== undefined) {
+                        firstValidBenchNav = nav;
+                        firstValidBenchIdx = i;
+                        break;
+                    }
+                }
+            }
+
+            // 投资最早日期的组合净值作为累计收益基准
+            const baseIdx = nodes[0].idx;
+            const baseComboNav = netValues[baseIdx];
+
+            // 计算基准在 baseIdx 处的对齐净值
+            let baseBenchNav = null;
+            if (bmMap && firstValidBenchNav !== null && firstValidBenchIdx >= 0) {
+                const scale = baseComboNav / firstValidBenchNav;
+                const baseDateStr = formatDate(validDates[baseIdx]);
+                const rawNav = bmMap.get(baseDateStr);
+                // 如果baseIdx处有基准数据，直接使用；否则通过前向填充获取
+                if (rawNav !== undefined) {
+                    baseBenchNav = rawNav * scale;
+                } else {
+                    // 前向填充：找到小于等于baseIdx的最近基准数据
+                    for (let i = baseIdx; i >= 0; i--) {
+                        const dateStr = formatDate(validDates[i]);
+                        const nav = bmMap.get(dateStr);
+                        if (nav !== undefined) {
+                            baseBenchNav = nav * scale;
+                            break;
+                        }
+                    }
+                }
+            }
+
+            // 6. 逐行计算数据
+            const rows = [];
+            for (let i = 0; i < nodes.length; i++) {
+                const node = nodes[i];
+                const idx = node.idx;
+                const dateStr = formatDate(node.date);
+                const comboNav = netValues[idx];
+
+                // 基准净值（对齐后）
+                let benchNav = null;
+                if (bmMap && firstValidBenchNav !== null && firstValidBenchIdx >= 0) {
+                    const scale = baseComboNav / firstValidBenchNav;
+                    const rawNav = bmMap.get(dateStr);
+                    if (rawNav !== undefined) {
+                        benchNav = rawNav * scale;
+                    } else {
+                        // 前向填充
+                        for (let j = idx; j >= 0; j--) {
+                            const fillDateStr = formatDate(validDates[j]);
+                            const fillNav = bmMap.get(fillDateStr);
+                            if (fillNav !== undefined) {
+                                benchNav = fillNav * scale;
+                                break;
+                            }
+                        }
+                    }
+                }
+
+                // 累计收益（相对于第一个节点）
+                const comboAccReturn = baseComboNav > 0 ? (comboNav / baseComboNav - 1) * 100 : 0;
+                const benchAccReturn = (benchNav !== null && baseBenchNav !== null && baseBenchNav > 0) 
+                    ? (benchNav / baseBenchNav - 1) * 100 : null;
+                const excessReturn = benchAccReturn !== null ? comboAccReturn - benchAccReturn : null;
+
+                // 阶段收益（相对于上一节点）
+                let stageCombo = null, stageBench = null;
+                if (i > 0) {
+                    const prevNode = nodes[i-1];
+                    const prevIdx = prevNode.idx;
+                    const prevCombo = netValues[prevIdx];
+                    stageCombo = prevCombo > 0 ? (comboNav / prevCombo - 1) * 100 : null;
+
+                    if (benchmarkData && benchNav !== null) {
+                        const prevDateStr = formatDate(validDates[prevIdx]);
+                        const prevRawNav = bmMap.get(prevDateStr);
+                        let prevBenchNav = null;
+                        if (prevRawNav !== undefined) {
+                            prevBenchNav = prevRawNav * (baseComboNav / firstValidBenchNav);
+                        } else {
+                            // 前向填充
+                            for (let j = prevIdx; j >= 0; j--) {
+                                const fillDateStr = formatDate(validDates[j]);
+                                const fillNav = bmMap.get(fillDateStr);
+                                if (fillNav !== undefined) {
+                                    prevBenchNav = fillNav * (baseComboNav / firstValidBenchNav);
+                                    break;
+                                }
+                            }
+                        }
+                        stageBench = (prevBenchNav && prevBenchNav > 0) ? (benchNav / prevBenchNav - 1) * 100 : null;
+                    }
+                }
+
+                rows.push({
+                    name: node.names.join('/'), // 如果有重叠，用斜杠分隔
+                    date: dateStr,
+                    comboNav: comboNav.toFixed(4),
+                    benchNav: benchNav !== null ? benchNav.toFixed(4) : '-',
+                    comboAcc: comboAccReturn.toFixed(2) + '%',
+                    benchAcc: benchAccReturn !== null ? benchAccReturn.toFixed(2) + '%' : '-',
+                    excess: excessReturn !== null ? excessReturn.toFixed(2) + '%' : '-',
+                    stageCombo: stageCombo !== null ? stageCombo.toFixed(2) + '%' : '-',
+                    stageBench: stageBench !== null ? stageBench.toFixed(2) + '%' : '-'
+                });
+            }
+
+            // 7. 渲染表格
+            const tbody = document.getElementById('analysisTableBody');
+            if (!tbody) return;
+            
+            tbody.innerHTML = rows.map(r => `
+                <tr class="hover:bg-gray-50">
+                    <td class="px-4 py-2 border-b text-center font-medium">${r.name}</td>
+                    <td class="px-4 py-2 border-b text-center font-mono">${r.date}</td>
+                    <td class="px-4 py-2 border-b text-center">${r.comboNav}</td>
+                    <td class="px-4 py-2 border-b text-center">${r.benchNav}</td>
+                    <td class="px-4 py-2 border-b text-center ${parseFloat(r.comboAcc) >= 0 ? 'text-green-600' : 'text-red-600'}">${r.comboAcc}</td>
+                    <td class="px-4 py-2 border-b text-center ${r.benchAcc !== '-' && parseFloat(r.benchAcc) >= 0 ? 'text-green-600' : 'text-red-600'}">${r.benchAcc}</td>
+                    <td class="px-4 py-2 border-b text-center ${r.excess !== '-' && parseFloat(r.excess) >= 0 ? 'text-green-600' : 'text-red-600'}">${r.excess}</td>
+                    <td class="px-4 py-2 border-b text-center ${r.stageCombo !== '-' && parseFloat(r.stageCombo) >= 0 ? 'text-green-600' : 'text-red-600'}">${r.stageCombo}</td>
+                    <td class="px-4 py-2 border-b text-center ${r.stageBench !== '-' && parseFloat(r.stageBench) >= 0 ? 'text-green-600' : 'text-red-600'}">${r.stageBench}</td>
+                </tr>
+            `).join('');
+        }
+
+        // ============ 导入 / 导出 / 报告 ============
+        const REPORT_VERSION = '20260708';
+        const CHART_JS_CDN = 'https://cdn.jsdelivr.net/npm/chart.js@4.4.1/dist/chart.umd.min.js';
+        const TAILWIND_CDN = 'https://cdn.tailwindcss.com';
+
+        // 序列化 / 反序列化 fundsData（Date <-> yyyy-mm-dd）
+        function serializeFunds(fd) {
+            const out = {};
+            for (const k in fd) {
+                const f = fd[k];
+                out[k] = {
+                    dates: f.dates.map(function (d) { return formatDate(d); }),
+                    nav: f.nav, div: f.div,
+                    minDate: f.minDate, maxDate: f.maxDate
+                };
+            }
+            return out;
+        }
+        function deserializeFunds(obj) {
+            const out = {};
+            for (const k in obj) {
+                const f = obj[k];
+                out[k] = {
+                    dates: f.dates.map(function (s) { return new Date(s + 'T00:00:00'); }),
+                    nav: f.nav, div: f.div,
+                    minDate: f.minDate, maxDate: f.maxDate
+                };
+            }
+            return out;
+        }
+
+        // 导出项目（打包全部基准）
+        async function exportProject() {
+            const benchmarks = await db.benchmarks.toArray();
+            const snap = {
+                version: REPORT_VERSION,
+                type: 'dca-backtest-project',
+                exportedAt: new Date().toISOString(),
+                fundsData: serializeFunds(fundsData),
+                investmentPlans: investmentPlans,
+                compositeWeights: compositeWeights,
+                fillMissingNav: fillMissingNav,
+                currentBenchmarkId: currentBenchmarkId,
+                benchmarks: benchmarks
+            };
+            const blob = new Blob([JSON.stringify(snap, null, 2)], { type: 'application/json' });
+            const url = URL.createObjectURL(blob);
+            const a = document.createElement('a');
+            a.href = url;
+            a.download = '回测项目_' + formatDate(new Date()) + '.json';
+            document.body.appendChild(a); a.click(); a.remove();
+            URL.revokeObjectURL(url);
+            alert('项目已导出（含全部基准数据）');
+        }
+
+        // 导入项目（基准 id 重映射 + 自动回测）
+        async function importProject(file) {
+            let snap;
+            try { snap = JSON.parse(await file.text()); }
+            catch (e) { alert('文件解析失败，请确认是导出的项目 JSON'); return; }
+            if (!snap || typeof snap !== 'object') { alert('文件格式不正确'); return; }
+
+            fundsData = snap.fundsData ? deserializeFunds(snap.fundsData) : {};
+            investmentPlans = Array.isArray(snap.investmentPlans) ? snap.investmentPlans : [];
+            compositeWeights = snap.compositeWeights || {};
+            fillMissingNav = !!snap.fillMissingNav;
+
+            await db.benchmarks.clear();
+            const idMap = {};
+            if (Array.isArray(snap.benchmarks)) {
+                for (const b of snap.benchmarks) {
+                    const rest = {};
+                    for (const k in b) { if (k !== 'id') rest[k] = b[k]; }
+                    idMap[b.id] = await db.benchmarks.add(rest);
+                }
+            }
+            currentBenchmarkId = snap.currentBenchmarkId != null ? idMap[snap.currentBenchmarkId] : null;
+
+            const fundSelect = document.getElementById('fundSelect');
+            fundSelect.innerHTML = '';
+            Object.keys(fundsData).forEach(function (code) {
+                const opt = document.createElement('option'); opt.value = code; opt.textContent = code; fundSelect.appendChild(opt);
+            });
+            let infoHtml = '<div class="font-medium text-green-600 mb-2">✅ 已加载基金（来自项目）：</div><ul class="list-disc list-inside space-y-1">';
+            Object.keys(fundsData).forEach(function (code) {
+                const f = fundsData[code];
+                infoHtml += '<li><strong>' + code + '</strong>：' + f.minDate + ' ~ ' + f.maxDate + '</li>';
+            });
+            infoHtml += '</ul>';
+            document.getElementById('fundInfo').innerHTML = infoHtml;
+
+            if (Object.keys(fundsData).length) {
+                document.getElementById('planSection').style.display = 'block';
+                document.getElementById('planListSection').style.display = 'block';
+                document.getElementById('resultSection').style.display = 'block';
+            }
+            renderPlanList();
+            await loadBenchmarkList();
+            if (investmentPlans.length > 0) runBacktest();
+            alert('项目导入完成，已自动运行回测');
+        }
+
+        // 报告内嵌脚本（在报告页内独立运行，复用主页算法）
+        function buildReportInner() {
+            const RD = window.__RD__;
+            let netValueChart = null, assetChart = null;
+            let curBmId = RD.currentBenchmarkId;
+            function formatDate(d) {
+                const y = d.getFullYear();
+                const m = String(d.getMonth() + 1).padStart(2, '0');
+                const day = String(d.getDate()).padStart(2, '0');
+                return y + '-' + m + '-' + day;
+            }
+            function getBenchmarkById(id) {
+                return RD.benchmarksData.find(function (b) { return b.id === id; }) || null;
+            }
+            const RISK_FREE_RATE = 0.025;
+            const MIN_TRADE_DAYS = 30;
+
+            // ============ 指标卡悬停解释（报告内复刻主工具 tooltip） ============
+            const METRIC_TIPS = {
+                "总投入本金": "回测区间内实际投入的所有资金（定投扣款+一次性买入），不含分红再投。即你的成本基数。",
+                "持仓市值": "期末仍持有的份额 × 最新净值，不含已到手现金分红。",
+                "累计现金分红": "累计收到的、未再投的现金分红；红利再投模式下为 0。",
+                "总资产": "持仓市值 + 累计现金分红，即组合上的全部家当。",
+                "累计收益率": "资金加权口径：(总资产 ÷ 本金 − 1)。<br>正数代表整体实际赚钱。",
+                "XIRR年化": "把每笔投入/分红/市值都当作现金流，算考虑时间权重的年化内部收益率。<br>早投的钱权重更高，比累计收益率更公平。",
+                "年化收益率(时间加权)": "把组合净值序列年化（剔除你的投入节奏），反映“组合本身”的赚钱能力。",
+                "胜率(正收益日占比)": "上涨交易日数 ÷ 总交易日数，越高说明日子大多在涨。",
+                "最大回撤": "净值从最高点到最低点的最大跌幅(%)，越大代表最坏情况越惨。",
+                "回撤持续天数": "最长一次从顶部跌下、再回到新高所经历的天数，越久越磨人。",
+                "年化波动率": "日收益波动 × √252，衡量价格颠簸程度，越大越刺激。",
+                "夏普/卡玛": "夏普=(年化收益−无风险利率)÷波动率；<br>卡玛=年化收益÷最大回撤。<br>两个都是越高越好。",
+                "区间投入本金": "选定图表区间内实际投入的资金（定投+一次性买入），不含分红再投。",
+                "区间期末市值": "区间期末仍持有的份额 × 区间末净值，不含已到手现金分红。",
+                "区间现金分红": "该区间内新收到的、未再投的现金分红。",
+                "区间期末总资产": "区间期末市值 + 区间内累计现金分红。",
+                "区间累计收益率": "时间加权口径：区间末净值 ÷ 区间初净值 − 1。<br>注意与上方“累计收益率”(资金加权)口径不同，不要直接横比。",
+                "区间XIRR年化": "把区间内每笔投入/分红/期末资产当作现金流，算考虑时间权重的年化收益。",
+                "区间年化收益率(时间加权)": "把区间净值序列年化（剔除投入节奏），反映区间窗口内组合本身的赚钱能力。",
+                "区间胜率(正收益日占比)": "该区间内上涨交易日数 ÷ 区间交易日数。",
+                "风险指标": "本金/市值类指标不在此列，这里只解释下方的回撤、波动率等风险项。"
+            };
+
+            function initMetricTooltip() {
+                const style = document.createElement('style');
+                style.textContent = `
+                #metricTip{position:fixed;z-index:9999;max-width:300px;background:#1f2937;color:#f3f4f6;
+                font-size:12px;line-height:1.6;padding:8px 11px;border-radius:8px;pointer-events:none;
+                box-shadow:0 6px 20px rgba(0,0,0,.28);display:none;white-space:normal;}
+                #metricTip b{color:#fbbf24;}`;
+                document.head.appendChild(style);
+
+                const tip = document.createElement('div');
+                tip.id = 'metricTip';
+                document.body.appendChild(tip);
+
+                ['metrics', 'periodMetrics'].forEach(function (id) {
+                    const box = document.getElementById(id);
+                    if (!box) return;
+                    box.addEventListener('mouseover', function (e) {
+                        const cell = e.target.closest('[data-mkey]');
+                        if (!cell) { tip.style.display = 'none'; return; }
+                        const key = cell.dataset.mkey;
+                        const txt = METRIC_TIPS[key];
+                        if (!txt) { tip.style.display = 'none'; return; }
+                        tip.innerHTML = '<b>' + key + '</b><br>' + txt;
+                        tip.style.display = 'block';
+                    });
+                    box.addEventListener('mousemove', function (e) {
+                        if (tip.style.display === 'block') {
+                            let x = e.clientX + 14, y = e.clientY + 14;
+                            const r = tip.getBoundingClientRect();
+                            if (x + r.width > window.innerWidth) x = e.clientX - r.width - 14;
+                            if (y + r.height > window.innerHeight) y = e.clientY - r.height - 14;
+                            tip.style.left = x + 'px';
+                            tip.style.top = y + 'px';
+                        }
+                    });
+                    box.addEventListener('mouseout', function (e) {
+                        if (!e.relatedTarget || !e.relatedTarget.closest('[data-mkey]')) tip.style.display = 'none';
+                    });
+                });
+            }
+
+            function xirr(cashFlows, dates, guess) {
+                guess = guess === undefined ? 0.1 : guess;
+                if (cashFlows.length !== dates.length || cashFlows.length < 2) return NaN;
+                const paired = cashFlows.map(function (cf, i) { return { cf: cf, date: dates[i] }; });
+                paired.sort(function (a, b) { return a.date - b.date; });
+                const sortedFlows = paired.map(function (p) { return p.cf; });
+                const sortedDates = paired.map(function (p) { return p.date; });
+                const maxIterations = 100, tolerance = 1e-6;
+                let rate = guess;
+                for (let i = 0; i < maxIterations; i++) {
+                    let npv = 0, npvDerivative = 0;
+                    const baseDate = sortedDates[0];
+                    for (let j = 0; j < sortedFlows.length; j++) {
+                        const days = (sortedDates[j] - baseDate) / (1000 * 60 * 60 * 24);
+                        const term = Math.pow(1 + rate, days / 365);
+                        npv += sortedFlows[j] / term;
+                        npvDerivative -= sortedFlows[j] * days / 365 * Math.pow(1 + rate, days / 365 - 1);
+                    }
+                    if (Math.abs(npv) < tolerance) return rate;
+                    if (Math.abs(npvDerivative) < tolerance) break;
+                    rate -= npv / npvDerivative;
+                }
+                return NaN;
+            }
+            function renderPeriodMetrics() {
+                const el = document.getElementById('periodMetrics');
+                const labelEl = document.getElementById('periodRangeLabel');
+                if (!el || !RD.reportData) return;
+                const startInput = document.getElementById('chartStartDate');
+                const endInput = document.getElementById('chartEndDate');
+                if (!startInput || !endInput || !startInput.value || !endInput.value) return;
+                const startStr = startInput.value, endStr = endInput.value;
+                const dates = RD.reportData.dates.map(function (s) { return new Date(s + 'T00:00:00'); });
+                const startD = new Date(startStr + 'T00:00:00'), endD = new Date(endStr + 'T00:00:00');
+                let i0 = -1, i1 = -1;
+                for (let i = 0; i < dates.length; i++) {
+                    if (i0 === -1 && dates[i] >= startD) i0 = i;
+                    if (dates[i] <= endD) i1 = i;
+                }
+                if (i0 === -1) i0 = 0;
+                if (i1 === -1) i1 = dates.length - 1;
+                if (i1 < i0) i1 = i0;
+                const nvs = RD.reportData.netValues.slice(i0, i1 + 1);
+                const assets = RD.reportData.assets.slice(i0, i1 + 1);
+                const invests = (RD.reportData.invests || []).slice(i0, i1 + 1);
+                const cashDivs = RD.reportData.cashDivs || [];
+                const wDates = dates.slice(i0, i1 + 1);
+                const n = nvs.length;
+                const windowDays = (dates[i1] - dates[i0]) / 86400000;
+
+                const intervalPrincipal = invests.reduce(function (a, b) { return a + (b || 0); }, 0);
+                const mvEnd = assets[n - 1] - (cashDivs[i1] || 0);
+                const cashDivInterval = (cashDivs[i1] || 0) - (i0 > 0 ? (cashDivs[i0 - 1] || 0) : 0);
+                const totalAssetEnd = assets[n - 1];
+
+                let cumReturn = NaN, xirrValInterval = NaN, annualReturnTwr = NaN, winRate = NaN;
+                if (n >= 2 && nvs[0] > 0) {
+                    cumReturn = nvs[n - 1] / nvs[0] - 1;
+                    if (windowDays > 0) {
+                        annualReturnTwr = Math.pow(nvs[n - 1] / nvs[0], 365 / windowDays) - 1;
+                        const flows = [ -assets[0] ], flowDates = [ dates[i0] ];
+                        for (let j = i0 + 1; j <= i1; j++) { flows.push(-invests[j - i0]); flowDates.push(dates[j]); }
+                        flows.push(assets[n - 1]); flowDates.push(dates[i1]);
+                        xirrValInterval = xirr(flows, flowDates) * 100;
+                    }
+                    const dailyReturns = [];
+                    for (let i = 1; i < n; i++) dailyReturns.push((nvs[i] - nvs[i - 1]) / nvs[i - 1]);
+                    winRate = dailyReturns.length ? dailyReturns.filter(function (r) { return r > 0; }).length / dailyReturns.length * 100 : NaN;
+                }
+                const twrHtml = isNaN(annualReturnTwr) ? '-' : (annualReturnTwr * 100).toFixed(2) + '%';
+                const winHtml = isNaN(winRate) ? '-' : winRate.toFixed(1) + '%';
+                const cumHtml = isNaN(cumReturn) ? '-' : (cumReturn * 100).toFixed(2) + '%';
+
+                let riskHtml;
+                if (n >= MIN_TRADE_DAYS) {
+                    const dailyReturns = [];
+                    for (let i = 1; i < n; i++) dailyReturns.push((nvs[i] - nvs[i - 1]) / nvs[i - 1]);
+                    const mean = dailyReturns.reduce(function (a, b) { return a + b; }, 0) / dailyReturns.length;
+                    const variance = dailyReturns.reduce(function (a, b) { return a + Math.pow(b - mean, 2); }, 0) / dailyReturns.length;
+                    const annualVolatility = Math.sqrt(variance) * Math.sqrt(252);
+                    let peak = nvs[0], maxDrawdown = 0;
+                    for (let k = 0; k < nvs.length; k++) { const v = nvs[k]; if (v > peak) peak = v; const dd = (v - peak) / peak; if (dd < maxDrawdown) maxDrawdown = dd; }
+                    maxDrawdown *= 100;
+                    let sharpeRatio = NaN, calmarRatio = NaN;
+                    if (annualVolatility > 0) sharpeRatio = (annualReturnTwr - RISK_FREE_RATE) / annualVolatility;
+                    if (maxDrawdown !== 0) calmarRatio = annualReturnTwr / Math.abs(maxDrawdown / 100);
+                    let peakV = nvs[0], ddFrom = null, maxSpan = 0;
+                    for (let i = 0; i < n; i++) {
+                        if (nvs[i] > peakV) { peakV = nvs[i]; ddFrom = null; }
+                        else if (nvs[i] < peakV) {
+                            if (ddFrom === null) ddFrom = i;
+                            const span = (wDates[i] - wDates[ddFrom]) / 86400000;
+                            if (span > maxSpan) maxSpan = span;
+                        }
+                    }
+                    riskHtml = '<div class="bg-red-50 p-4 rounded-lg text-center" data-mkey="最大回撤"><div class="text-sm text-slate-500">最大回撤</div><div class="text-2xl font-bold text-red-700">' + maxDrawdown.toFixed(2) + '%</div></div>' +
+                        '<div class="bg-red-50 p-4 rounded-lg text-center" data-mkey="回撤持续天数"><div class="text-sm text-slate-500">回撤持续天数</div><div class="text-2xl font-bold text-red-700">' + maxSpan.toFixed(0) + ' 天</div></div>' +
+                        '<div class="bg-red-50 p-4 rounded-lg text-center" data-mkey="年化波动率"><div class="text-sm text-slate-500">年化波动率</div><div class="text-2xl font-bold text-red-700">' + (annualVolatility * 100).toFixed(2) + '%</div></div>' +
+                        '<div class="bg-red-50 p-4 rounded-lg text-center" data-mkey="夏普/卡玛"><div class="text-sm text-slate-500">夏普/卡玛</div><div class="text-2xl font-bold text-red-700">' + (isNaN(sharpeRatio) ? '-' : sharpeRatio.toFixed(2)) + '/' + (isNaN(calmarRatio) ? '-' : calmarRatio.toFixed(2)) + '</div></div>';
+                } else {
+                    riskHtml = '<div class="bg-gray-100 p-4 rounded-lg text-center col-span-4" data-mkey="风险指标"><div class="text-sm text-gray-600">风险指标</div><div class="text-xl font-medium text-gray-500">区间交易日不足' + MIN_TRADE_DAYS + '个，以下指标暂不可用</div></div>';
+                }
+
+                el.innerHTML = '' +
+                    '<div class="bg-sky-50 p-4 rounded-lg text-center" data-mkey="区间投入本金"><div class="text-sm text-slate-500">区间投入本金</div><div class="text-2xl font-bold text-sky-700">' + intervalPrincipal.toFixed(2) + ' 元</div></div>' +
+                    '<div class="bg-sky-50 p-4 rounded-lg text-center" data-mkey="区间期末市值"><div class="text-sm text-slate-500">区间期末市值</div><div class="text-2xl font-bold text-sky-700">' + mvEnd.toFixed(2) + ' 元</div></div>' +
+                    '<div class="bg-sky-50 p-4 rounded-lg text-center" data-mkey="区间现金分红"><div class="text-sm text-slate-500">区间现金分红</div><div class="text-2xl font-bold text-sky-700">' + cashDivInterval.toFixed(2) + ' 元</div></div>' +
+                    '<div class="bg-sky-50 p-4 rounded-lg text-center" data-mkey="区间期末总资产"><div class="text-sm text-slate-500">区间期末总资产</div><div class="text-2xl font-bold text-sky-700">' + totalAssetEnd.toFixed(2) + ' 元</div></div>' +
+                    '<div class="bg-green-50 p-4 rounded-lg text-center" data-mkey="区间累计收益率"><div class="text-sm text-slate-500">区间累计收益率</div><div class="text-2xl font-bold text-green-700">' + cumHtml + '</div></div>' +
+                    '<div class="bg-green-50 p-4 rounded-lg text-center" data-mkey="区间XIRR年化"><div class="text-sm text-slate-500">区间XIRR年化</div><div class="text-2xl font-bold text-green-700">' + (isNaN(xirrValInterval) ? '-' : xirrValInterval.toFixed(2) + '%') + '</div></div>' +
+                    '<div class="bg-green-50 p-4 rounded-lg text-center" data-mkey="区间年化收益率(时间加权)"><div class="text-sm text-slate-500">区间年化收益率(时间加权)</div><div class="text-2xl font-bold text-green-700">' + twrHtml + '</div></div>' +
+                    '<div class="bg-green-50 p-4 rounded-lg text-center" data-mkey="区间胜率(正收益日占比)"><div class="text-sm text-slate-500">区间胜率(正收益日占比)</div><div class="text-2xl font-bold text-green-700">' + winHtml + '</div></div>' +
+                    riskHtml;
+                if (labelEl) labelEl.textContent = '（' + startStr + ' ~ ' + endStr + '，共 ' + n + ' 个交易日）';
+            }
+            function updateCharts() {
+                const startDate = new Date(document.getElementById('chartStartDate').value + 'T00:00:00');
+                const endDate = new Date(document.getElementById('chartEndDate').value + 'T00:00:00');
+                const dates = RD.reportData.dates.map(function (s) { return new Date(s + 'T00:00:00'); });
+                const filtered = dates.map(function (d, i) {
+                    return { date: d, asset: RD.reportData.assets[i], nv: RD.reportData.netValues[i] };
+                }).filter(function (item) { return item.date >= startDate && item.date <= endDate; });
+                const chartDates = filtered.map(function (d) { return formatDate(d.date); });
+                const chartAssets = filtered.map(function (d) { return d.asset; });
+                const chartNetValues = filtered.map(function (d) { return d.nv; });
+
+                let benchmarkDataset = null;
+                if (curBmId && filtered.length > 0) {
+                    const benchmark = getBenchmarkById(curBmId);
+                    if (benchmark && benchmark.data.length > 0) {
+                        const bmMap = new Map(benchmark.data.map(function (d) { return [d.date, d.nav]; }));
+                        const rawBenchValues = [];
+                        filtered.forEach(function (f) {
+                            const nav = bmMap.get(formatDate(f.date));
+                            rawBenchValues.push(nav !== undefined ? nav : null);
+                        });
+                        for (let i = 1; i < rawBenchValues.length; i++) {
+                            if (rawBenchValues[i] === null) rawBenchValues[i] = rawBenchValues[i - 1];
+                        }
+                        let firstValidIdx = -1, firstBenchNav = null;
+                        for (let i = 0; i < rawBenchValues.length; i++) {
+                            if (rawBenchValues[i] !== null) { firstValidIdx = i; firstBenchNav = rawBenchValues[i]; break; }
+                        }
+                        if (firstValidIdx !== -1) {
+                            const firstNetValue = chartNetValues[firstValidIdx];
+                            if (firstNetValue && firstBenchNav > 0) {
+                                const scale = firstNetValue / firstBenchNav;
+                                const scaledBenchValues = rawBenchValues.map(function (v) { return v !== null ? v * scale : null; });
+                                benchmarkDataset = {
+                                    label: benchmark.name + ' (比较基准)',
+                                    data: scaledBenchValues,
+                                    borderColor: '#f97316', backgroundColor: 'transparent',
+                                    borderDash: [5, 5], borderWidth: 2, pointRadius: 0, tension: 0.1, spanGaps: false
+                                };
+                            }
+                        }
+                    }
+                }
+                const startNetValue = chartNetValues.length > 0 ? chartNetValues[0] : 1.0;
+                const netDatasets = [{
+                    label: '组合净值', data: chartNetValues, borderColor: '#10b981',
+                    backgroundColor: 'rgba(16,185,129,0.1)', fill: true, tension: 0.1,
+                    pointRadius: 0, pointHoverRadius: 6, yAxisID: 'y'
+                }];
+                if (benchmarkDataset) { benchmarkDataset.yAxisID = 'y'; netDatasets.push(benchmarkDataset); }
+                const allNumericValues = chartNetValues.concat(benchmarkDataset ? benchmarkDataset.data.filter(function (v) { return v !== null && !isNaN(v); }) : []);
+                const minVal = Math.min.apply(null, allNumericValues);
+                const maxVal = Math.max.apply(null, allNumericValues);
+                const padding = (maxVal - minVal) * 0.05;
+                const netCtx = document.getElementById('netValueChart').getContext('2d');
+                if (netValueChart) netValueChart.destroy();
+                netValueChart = new Chart(netCtx, {
+                    type: 'line',
+                    data: { labels: chartDates, datasets: netDatasets },
+                    options: {
+                        responsive: true, interaction: { mode: 'index', intersect: false },
+                        plugins: {
+                            tooltip: { mode: 'index', callbacks: { label: function (context) { return context.dataset.label + ': ' + context.parsed.y.toFixed(4); } } },
+                            legend: { labels: { usePointStyle: true } }
+                        },
+                        scales: {
+                            x: { ticks: { maxTicksLimit: 15 } },
+                            y: {
+                                beginAtZero: false, position: 'left',
+                                title: { display: true, text: '净值 (起始日 ' + startNetValue.toFixed(4) + ')' },
+                                min: minVal - padding, max: maxVal + padding,
+                                ticks: { callback: function (value) { return value.toFixed(4); } }
+                            },
+                            y1: {
+                                position: 'right', title: { display: true, text: '相对起始日涨跌 (%)' },
+                                grid: { drawOnChartArea: false }, min: minVal - padding, max: maxVal + padding,
+                                ticks: { callback: function (value) { if (!startNetValue || startNetValue === 0) return ''; const pct = ((value - startNetValue) / startNetValue) * 100; return pct.toFixed(1) + '%'; } }
+                            }
+                        }
+                    }
+                });
+                const assetCtx = document.getElementById('assetChart').getContext('2d');
+                if (assetChart) assetChart.destroy();
+                assetChart = new Chart(assetCtx, {
+                    type: 'line',
+                    data: { labels: chartDates, datasets: [{ label: '总资产', data: chartAssets, borderColor: '#3b82f6', backgroundColor: 'rgba(59,130,246,0.1)', fill: true, tension: 0.1, pointRadius: 0 }] },
+                    options: { responsive: true, interaction: { mode: 'index' }, scales: { x: { ticks: { maxTicksLimit: 15 } } } }
+                });
+                renderAnalysisTable();
+                renderPeriodMetrics();
+            }
+            async function renderAnalysisTable() {
+                const validDates = RD.reportData.dates.map(function (s) { return new Date(s + 'T00:00:00'); });
+                const netValues = RD.reportData.netValues;
+                if (validDates.length === 0 || netValues.length === 0) return;
+                const firstInvestmentDate = validDates[0];
+                const latestPortfolioDate = validDates[validDates.length - 1];
+                const chartStartInput = document.getElementById('chartStartDate');
+                const chartEndInput = document.getElementById('chartEndDate');
+                const chartStartDate = chartStartInput && chartStartInput.value ? new Date(chartStartInput.value + 'T00:00:00') : null;
+                const chartEndDate = chartEndInput && chartEndInput.value ? new Date(chartEndInput.value + 'T00:00:00') : null;
+                const adjustedChartStartDate = (chartStartDate && chartStartDate >= validDates[0] && chartStartDate <= validDates[validDates.length - 1]) ? chartStartDate : validDates[0];
+                const adjustedChartEndDate = (chartEndDate && chartEndDate >= validDates[0] && chartEndDate <= validDates[validDates.length - 1]) ? chartEndDate : validDates[validDates.length - 1];
+                let benchmarkData = null;
+                if (curBmId) { const bm = getBenchmarkById(curBmId); benchmarkData = bm ? bm.data : null; }
+                function getIndexForDate(targetDate) {
+                    if (!targetDate) return -1;
+                    for (let i = validDates.length - 1; i >= 0; i--) { if (validDates[i] <= targetDate) return i; }
+                    return 0;
+                }
+                const nodeConfigs = [
+                    { name: '第一笔投资', getIndex: function () { return 0; } },
+                    { name: '图表开始', getIndex: function () { return getIndexForDate(adjustedChartStartDate); } },
+                    { name: '图表结束', getIndex: function () { return getIndexForDate(adjustedChartEndDate); } },
+                    { name: '组合最新', getIndex: function () { return validDates.length - 1; } }
+                ];
+                const nodes = []; const seenIndices = new Set();
+                nodeConfigs.forEach(function (config) {
+                    const idx = config.getIndex();
+                    if (idx >= 0 && idx < validDates.length) {
+                        if (seenIndices.has(idx)) { const ex = nodes.find(function (n) { return n.idx === idx; }); if (ex) ex.names.push(config.name); }
+                        else { nodes.push({ idx: idx, date: validDates[idx], names: [config.name] }); seenIndices.add(idx); }
+                    }
+                });
+                nodes.sort(function (a, b) { return a.idx - b.idx; });
+                if (nodes.length === 0) return;
+                let bmMap = null, firstValidBenchNav = null, firstValidBenchIdx = -1;
+                if (benchmarkData) {
+                    bmMap = new Map(benchmarkData.map(function (d) { return [d.date, d.nav]; }));
+                    for (let i = 0; i < validDates.length; i++) {
+                        const nav = bmMap.get(formatDate(validDates[i]));
+                        if (nav !== undefined) { firstValidBenchNav = nav; firstValidBenchIdx = i; break; }
+                    }
+                }
+                const baseIdx = nodes[0].idx;
+                const baseComboNav = netValues[baseIdx];
+                let baseBenchNav = null;
+                if (bmMap && firstValidBenchNav !== null && firstValidBenchIdx >= 0) {
+                    const scale = baseComboNav / firstValidBenchNav;
+                    const baseDateStr = formatDate(validDates[baseIdx]);
+                    const rawNav = bmMap.get(baseDateStr);
+                    if (rawNav !== undefined) baseBenchNav = rawNav * scale;
+                    else { for (let i = baseIdx; i >= 0; i--) { const nav = bmMap.get(formatDate(validDates[i])); if (nav !== undefined) { baseBenchNav = nav * scale; break; } } }
+                }
+                const rows = [];
+                for (let i = 0; i < nodes.length; i++) {
+                    const node = nodes[i];
+                    const idx = node.idx;
+                    const dateStr = formatDate(node.date);
+                    const comboNav = netValues[idx];
+                    let benchNav = null;
+                    if (bmMap && firstValidBenchNav !== null && firstValidBenchIdx >= 0) {
+                        const scale = baseComboNav / firstValidBenchNav;
+                        const rawNav = bmMap.get(dateStr);
+                        if (rawNav !== undefined) benchNav = rawNav * scale;
+                        else { for (let j = idx; j >= 0; j--) { const nav = bmMap.get(formatDate(validDates[j])); if (nav !== undefined) { benchNav = nav * scale; break; } } }
+                    }
+                    const comboAccReturn = baseComboNav > 0 ? (comboNav / baseComboNav - 1) * 100 : 0;
+                    const benchAccReturn = (benchNav !== null && baseBenchNav !== null && baseBenchNav > 0) ? (benchNav / baseBenchNav - 1) * 100 : null;
+                    const excessReturn = benchAccReturn !== null ? comboAccReturn - benchAccReturn : null;
+                    let stageCombo = null, stageBench = null;
+                    if (i > 0) {
+                        const prevIdx = nodes[i - 1].idx;
+                        const prevCombo = netValues[prevIdx];
+                        stageCombo = prevCombo > 0 ? (comboNav / prevCombo - 1) * 100 : null;
+                        if (benchmarkData && benchNav !== null) {
+                            const prevDateStr = formatDate(validDates[prevIdx]);
+                            const prevRawNav = bmMap.get(prevDateStr);
+                            let prevBenchNav = null;
+                            if (prevRawNav !== undefined) prevBenchNav = prevRawNav * (baseComboNav / firstValidBenchNav);
+                            else { for (let j = prevIdx; j >= 0; j--) { const nav = bmMap.get(formatDate(validDates[j])); if (nav !== undefined) { prevBenchNav = nav * (baseComboNav / firstValidBenchNav); break; } } }
+                            stageBench = (prevBenchNav && prevBenchNav > 0) ? (benchNav / prevBenchNav - 1) * 100 : null;
+                        }
+                    }
+                    rows.push({
+                        name: node.names.join('/'), date: dateStr,
+                        comboNav: comboNav.toFixed(4),
+                        benchNav: benchNav !== null ? benchNav.toFixed(4) : '-',
+                        comboAcc: comboAccReturn.toFixed(2) + '%',
+                        benchAcc: benchAccReturn !== null ? benchAccReturn.toFixed(2) + '%' : '-',
+                        excess: excessReturn !== null ? excessReturn.toFixed(2) + '%' : '-',
+                        stageCombo: stageCombo !== null ? stageCombo.toFixed(2) + '%' : '-',
+                        stageBench: stageBench !== null ? stageBench.toFixed(2) + '%' : '-'
+                    });
+                }
+                const tbody = document.getElementById('analysisTableBody');
+                if (!tbody) return;
+                tbody.innerHTML = rows.map(function (r) {
+                    return '<tr class="hover:bg-gray-50">' +
+                        '<td class="px-4 py-2 border-b text-center font-medium">' + r.name + '</td>' +
+                        '<td class="px-4 py-2 border-b text-center font-mono">' + r.date + '</td>' +
+                        '<td class="px-4 py-2 border-b text-center">' + r.comboNav + '</td>' +
+                        '<td class="px-4 py-2 border-b text-center">' + r.benchNav + '</td>' +
+                        '<td class="px-4 py-2 border-b text-center ' + (parseFloat(r.comboAcc) >= 0 ? 'text-green-600' : 'text-red-600') + '">' + r.comboAcc + '</td>' +
+                        '<td class="px-4 py-2 border-b text-center ' + (r.benchAcc !== '-' && parseFloat(r.benchAcc) >= 0 ? 'text-green-600' : 'text-red-600') + '">' + r.benchAcc + '</td>' +
+                        '<td class="px-4 py-2 border-b text-center ' + (r.excess !== '-' && parseFloat(r.excess) >= 0 ? 'text-green-600' : 'text-red-600') + '">' + r.excess + '</td>' +
+                        '<td class="px-4 py-2 border-b text-center ' + (r.stageCombo !== '-' && parseFloat(r.stageCombo) >= 0 ? 'text-green-600' : 'text-red-600') + '">' + r.stageCombo + '</td>' +
+                        '<td class="px-4 py-2 border-b text-center ' + (r.stageBench !== '-' && parseFloat(r.stageBench) >= 0 ? 'text-green-600' : 'text-red-600') + '">' + r.stageBench + '</td>' +
+                        '</tr>';
+                }).join('');
+            }
+            document.getElementById('chartStartDate').addEventListener('change', updateCharts);
+            document.getElementById('chartEndDate').addEventListener('change', updateCharts);
+            document.getElementById('benchmarkSelect').addEventListener('change', function (e) {
+                curBmId = e.target.value ? parseInt(e.target.value) : null;
+                updateCharts();
+            });
+            updateCharts();
+            initMetricTooltip();
+        }
+
+        // 导出交互式 HTML 报告（Chart.js 内联，纯离线；Tailwind CDN；内嵌全部基准可切换）
+        async function exportReportHTML() {
+            if (!backtestResult.dates || backtestResult.dates.length === 0) { alert('请先运行回测再导出报告'); return; }
+            const reportData = {
+                dates: backtestResult.dates.map(function (d) { return formatDate(d); }),
+                assets: backtestResult.assets,
+                netValues: backtestResult.netValues,
+                invests: backtestResult.invests || [],
+                cashDivs: backtestResult.cashDivs || []
+            };
+            const benchmarksAll = await db.benchmarks.toArray();
+            const benchmarksData = benchmarksAll.map(function (b) { return { id: b.id, name: b.name, data: b.data }; });
+            const metricsHtml = document.getElementById('metrics').innerHTML;
+
+            // 盈利概率 / 相关性分析（抓取当前已渲染的表格快照）
+            const ppTableHtml = document.getElementById('profitProbabilityTable') ? document.getElementById('profitProbabilityTable').innerHTML : '';
+            const ppVisible = document.getElementById('profitProbabilitySection') && document.getElementById('profitProbabilitySection').style.display !== 'none' && ppTableHtml.trim() !== '';
+            const corrTableHtml = document.getElementById('correlationTable') ? document.getElementById('correlationTable').innerHTML : '';
+            const corrLegendHtml = document.getElementById('correlationLegend') ? document.getElementById('correlationLegend').innerHTML : '';
+            const corrVisible = document.getElementById('correlationSection') && document.getElementById('correlationSection').style.display !== 'none' && corrTableHtml.trim() !== '';
+            const ppDesc = profitMode === 'dca'
+                ? '以历史任意时点为起点、按投资计划规则进行定投模拟，持有满对应时长后的盈利概率、平均持有收益与年化收益率（资金加权；持有期以交易日近似，1 自然年 ≈ 252 交易日）。'
+                : '历史任意时点一次性买入并持有满对应时长后的盈利概率、平均收益与年化收益率（时间加权净值口径；持有期以交易日近似，1 自然年 ≈ 252 交易日）。';
+            const ppBodyHtml = ppVisible
+                ? ('<p class="text-sm text-gray-500 mb-4">' + ppDesc + '</p>' + ppTableHtml + '<p class="text-xs text-gray-400 mt-3">盈利概率为历史业绩数据测算，不代表未来收益。</p>')
+                : '';
+            const corrBodyHtml = corrVisible
+                ? ('<p class="text-sm text-gray-500 mb-4">投资计划中各基金日收益率（以交易日对齐）的皮尔逊相关系数矩阵。</p>' + corrTableHtml + corrLegendHtml + '<p class="text-xs text-gray-400 mt-3">本页面展示收益相关数据仅为历史数据测算，不构成收益保证或预示其未来表现。</p>')
+                : '';
+
+            // 同步主工具界面 5 个折叠面板的当前状态（容器含 hidden 类即代表已折叠）
+            const _isHidden = function (id) { const el = document.getElementById(id); return el ? el.classList.contains('hidden') : false; };
+            const ppCollapsed = _isHidden('profitProbCollapsible');
+            const corrCollapsed = _isHidden('correlationCollapsible');
+            const netCollapsed = _isHidden('netValueChartCollapsible');
+            const assetCollapsed = _isHidden('assetChartCollapsible');
+            const analysisCollapsed = _isHidden('analysisTableCollapsible');
+
+            // 报告面板辅助构造器：普通卡片 / 可折叠卡片（交互与主工具一致）
+            function rptPlain(title, bodyHtml) {
+                return '<div class="bg-white p-6 rounded-xl shadow-md mb-6">\n' +
+                    '    <h3 class="text-lg font-semibold text-gray-700 mb-3">' + title + '</h3>\n' +
+                    bodyHtml + '\n' +
+                    '</div>';
+            }
+            function rptCollapsible(title, targetId, bodyHtml, collapsed) {
+                return '<div class="bg-white p-6 rounded-xl shadow-md mb-6">\n' +
+                    '    <div class="flex items-center justify-between mb-3">\n' +
+                    '        <h3 class="text-lg font-semibold text-gray-700">' + title + '</h3>\n' +
+                    '        <button type="button" class="text-sm text-gray-500 hover:text-gray-700 px-2 py-1 rounded border" data-target="' + targetId + '" onclick="toggleRpt(this)">' + (collapsed ? '▼ 展开' : '▲ 折叠') + '</button>\n' +
+                    '    </div>\n' +
+                    '    <div id="' + targetId + '"' + (collapsed ? ' class="hidden"' : '') + '>' + bodyHtml + '</div>\n' +
+                    '</div>';
+            }
+            const startD = formatDate(backtestResult.dates[0]);
+            const endD = formatDate(backtestResult.dates[backtestResult.dates.length - 1]);
+            const data = { reportData: reportData, benchmarksData: benchmarksData, currentBenchmarkId: currentBenchmarkId };
+
+            let chartJsSrc = '';
+            try { chartJsSrc = await (await fetch(CHART_JS_CDN)).text(); } catch (e) { chartJsSrc = ''; }
+            let chartJsBlock;
+            if (chartJsSrc) chartJsBlock = '<scr' + 'ipt>' + chartJsSrc.replace(/<\/script>/gi, '<\\/script>') + '</scr' + 'ipt>';
+            else chartJsBlock = '<scr' + 'ipt src="' + CHART_JS_CDN + '"></scr' + 'ipt>';
+
+            // 投资计划概览表（与回测结果一并导出，便于分享查看）
+            const planRowsHtml = investmentPlans.map(function (p, i) {
+                const typeText = p.type === 'single' ? '单笔' : p.type === 'weekly' ? '每周定投' : '每月定投';
+                const divText = p.div === 'reinvest' ? '红利再投资' : '现金分红';
+                const cn = fundCodeName(p.fund);
+                const periodText = p.type === 'single' ? p.startDate : (p.startDate + ' ~ ' + p.endDate);
+                let durText = '—';
+                if (p.type !== 'single') {
+                    const sd = new Date(p.startDate + 'T00:00:00');
+                    const ed = new Date(p.endDate + 'T00:00:00');
+                    if (!isNaN(sd) && !isNaN(ed) && ed >= sd) {
+                        durText = (Math.round((ed - sd) / 86400000) / 365).toFixed(2) + ' 年';
+                    }
+                }
+                return '<tr class="hover:bg-gray-50">' +
+                    '<td class="px-3 py-2 border-b text-center">' + (i + 1) + '</td>' +
+                    '<td class="px-3 py-2 border-b text-center font-mono text-xs">' + cn.code + '</td>' +
+                    '<td class="px-3 py-2 border-b text-center font-medium">' + (cn.name || cn.code) + '</td>' +
+                    '<td class="px-3 py-2 border-b text-center">' + typeText + '</td>' +
+                    '<td class="px-3 py-2 border-b text-center">' + p.amount.toFixed(0) + ' 元</td>' +
+                    '<td class="px-3 py-2 border-b text-center ' + (p.div === 'reinvest' ? 'text-emerald-600 font-medium' : 'text-amber-600') + '">' + divText + '</td>' +
+                    '<td class="px-3 py-2 border-b text-center font-mono text-xs">' + periodText + '</td>' +
+                    '<td class="px-3 py-2 border-b text-center text-xs text-gray-500">' + durText + '</td>' +
+                    '</tr>';
+            }).join('');
+            const planTableHtml = investmentPlans.length === 0
+                ? '<p class="text-gray-500 text-sm">本次回测未添加投资计划。</p>'
+                : '<div class="overflow-x-auto"><table class="min-w-full bg-white border border-gray-200 rounded-lg text-sm">' +
+                  '<thead class="bg-gray-100"><tr>' +
+                  '<th class="px-3 py-2 border-b text-center">#</th>' +
+                  '<th class="px-3 py-2 border-b text-center">代码</th>' +
+                  '<th class="px-3 py-2 border-b text-center">基金名称</th>' +
+                  '<th class="px-3 py-2 border-b text-center">投资方法</th>' +
+                  '<th class="px-3 py-2 border-b text-center">投资金额</th>' +
+                  '<th class="px-3 py-2 border-b text-center">分红方式</th>' +
+                  '<th class="px-3 py-2 border-b text-center">投资期限(起止)</th>' +
+                  '<th class="px-3 py-2 border-b text-center">投资年限</th>' +
+                  '</tr></thead><tbody>' + planRowsHtml + '</tbody></table></div>';
+
+            const inner = '(' + buildReportInner.toString() + ')();';
+
+            const benchmarkOptions = benchmarksData.map(function (b) {
+                return '<option value="' + b.id + '"' + (b.id === currentBenchmarkId ? ' selected' : '') + '>' + b.name + '</option>';
+            }).join('');
+
+            const analysisTableInner =
+                '                    <div class="overflow-x-auto">\n' +
+                '                        <table class="min-w-full bg-white border border-gray-200 rounded-lg text-sm">\n' +
+                '                            <thead class="bg-gray-100"><tr>\n' +
+                '                                <th class="px-4 py-2 border-b text-center">节点</th><th class="px-4 py-2 border-b text-center">日期</th>\n' +
+                '                                <th class="px-4 py-2 border-b text-center">组合净值</th><th class="px-4 py-2 border-b text-center">基准净值</th>\n' +
+                '                                <th class="px-4 py-2 border-b text-center">组合累计收益</th><th class="px-4 py-2 border-b text-center">基准累计收益</th>\n' +
+                '                                <th class="px-4 py-2 border-b text-center">超额收益</th><th class="px-4 py-2 border-b text-center">阶段收益(组合)</th>\n' +
+                '                                <th class="px-4 py-2 border-b text-center">阶段收益(基准)</th>\n' +
+                '                            </tr></thead>\n' +
+                '                            <tbody id="analysisTableBody"></tbody>\n' +
+                '                        </table>\n' +
+                '                    </div>\n' +
+                '                    <p class="text-xs text-gray-500 mt-2">* 净值已归一化至投资最早日期为1.0，基准已对齐组合起点。阶段收益为相邻节点间收益率。</p>';
+
+            const html = '<!DOCTYPE html>\n' +
+                '<html lang="zh-CN">\n' +
+                '<head>\n' +
+                '    <meta charset="UTF-8">\n' +
+                '    <meta name="viewport" content="width=device-width, initial-scale=1.0">\n' +
+                '    <title>基金组合回测报告</title>\n' +
+                '    <scr' + 'ipt src="' + TAILWIND_CDN + '"></scr' + 'ipt>\n' +
+                '    ' + chartJsBlock + '\n' +
+                '    <scr' + 'ipt>\n' +
+                '        function toggleRpt(b){var id=b.getAttribute("data-target");var c=document.getElementById(id);var col=c.classList.toggle("hidden");b.textContent=col?"▼ 展开":"▲ 折叠";if(!col){var cid=id==="rptNetValue"?"netValueChart":(id==="rptAsset"?"assetChart":null);if(cid){var ch=window.Chart&&Chart.getChart(cid);if(ch)ch.resize();}window.dispatchEvent(new Event("resize"));}}\n' +
+                '    </scr' + 'ipt>\n' +
+                '</head>\n' +
+                '<body class="bg-gray-50 min-h-screen p-6">\n' +
+                '    <div class="max-w-6xl mx-auto">\n' +
+                '        <h1 class="text-3xl font-bold text-center mb-8 text-gray-800">📊 基金组合回测报告</h1>\n' +
+                // 投资计划概览（置顶，常开）
+                rptPlain('投资计划概览', planTableHtml) + '\n' +
+                // 回测指标（常开）
+                '        <div class="bg-white p-6 rounded-xl shadow-md mb-6">\n' +
+                '            <h3 class="text-lg font-semibold text-gray-700 mb-3">回测指标</h3>\n' +
+                '            <div id="metrics" class="grid grid-cols-2 md:grid-cols-4 gap-4">' + metricsHtml + '</div>\n' +
+                '        </div>\n' +
+                // 盈利概率（可折叠，状态同步主工具）
+                (ppBodyHtml ? rptCollapsible('盈利概率', 'rptProfitProb', ppBodyHtml, ppCollapsed) + '\n' : '') +
+                // 相关性分析（可折叠，状态同步主工具）
+                (corrBodyHtml ? rptCollapsible('相关性分析', 'rptCorr', corrBodyHtml, corrCollapsed) + '\n' : '') +
+                // 图表设置（常开：日期筛选 + 比较基准）
+                '        <div class="bg-white p-6 rounded-xl shadow-md mb-6">\n' +
+                '            <h3 class="text-lg font-semibold text-gray-700 mb-3">图表设置</h3>\n' +
+                '            <div class="bg-gray-50 p-4 rounded-lg mb-6">\n' +
+                '                <h4 class="text-base font-semibold mb-3 text-gray-700">图表日期范围筛选</h4>\n' +
+                '                <div class="grid grid-cols-1 md:grid-cols-2 gap-4">\n' +
+                '                    <div><label class="block text-sm font-medium text-gray-700 mb-1">起始日期</label><input type="date" id="chartStartDate" class="w-full p-2 border border-gray-300 rounded-lg" value="' + startD + '" min="' + startD + '" max="' + endD + '"></div>\n' +
+                '                    <div><label class="block text-sm font-medium text-gray-700 mb-1">结束日期</label><input type="date" id="chartEndDate" class="w-full p-2 border border-gray-300 rounded-lg" value="' + endD + '" min="' + startD + '" max="' + endD + '"></div>\n' +
+                '                </div>\n' +
+                '            </div>\n' +
+                '            <div class="mb-4 flex items-center gap-3">\n' +
+                '                <label class="text-sm font-medium text-gray-700">比较基准：</label>\n' +
+                '                <select id="benchmarkSelect" class="p-2 border border-gray-500 rounded-lg bg-white shadow-sm">\n' +
+                '                    <option value="">-- 无 --</option>\n' +
+                benchmarkOptions +
+                '                </select>\n' +
+                '            </div>\n' +
+                '        </div>\n' +
+                // 组合净值 vs 比较基准（可折叠）
+                rptCollapsible('组合净值 vs 比较基准', 'rptNetValue', '<canvas id="netValueChart"></canvas>', netCollapsed) + '\n' +
+                // 组合总资产曲线（可折叠）
+                rptCollapsible('组合总资产曲线', 'rptAsset', '<canvas id="assetChart"></canvas>', assetCollapsed) + '\n' +
+                // 关键节点对比分析（可折叠）
+                rptCollapsible('关键节点对比分析', 'rptAnalysis', analysisTableInner, analysisCollapsed) + '\n' +
+                // 选定区间投资表现（常开）
+                '        <div class="bg-white p-6 rounded-xl shadow-md mb-6">\n' +
+                '            <h3 class="text-lg font-semibold mb-3 text-gray-700">📊 选定区间投资表现<span id="periodRangeLabel" class="text-sm font-normal text-gray-500"></span></h3>\n' +
+                '            <div id="periodMetrics" class="grid grid-cols-2 md:grid-cols-4 gap-4"></div>\n' +
+                '            <p class="text-xs text-gray-500 mt-2">* 区间指标随上方日期筛选动态更新。</p>\n' +
+                '        </div>\n' +
+                '        <p class="text-center text-xs text-gray-400 mt-4">本报告由「基金组合回测工具」生成，基准切换与日期筛选均可在浏览器中交互。</p>\n' +
+                '    </div>\n' +
+                '    <scr' + 'ipt>window.__RD__ = ' + JSON.stringify(data).replace(/<\/script>/gi, '<\\/script>') + ';</scr' + 'ipt>\n' +
+                '    <scr' + 'ipt>' + inner + '</scr' + 'ipt>\n' +
+                '</body>\n' +
+                '</html>';
+
+            const blob = new Blob([html], { type: 'text/html;charset=utf-8' });
+            const url = URL.createObjectURL(blob);
+            const a = document.createElement('a');
+            a.href = url;
+            a.download = '回测报告_' + startD + '_' + endD + '.html';
+            document.body.appendChild(a); a.click(); a.remove();
+            URL.revokeObjectURL(url);
+        }
+
+        // ================= 定投策略比较沙盒 =================
+        let scItems = [];
+        let scResults = [];
+        let scChart = null;
+        let scCommonStart = null;
+        const SC_COLORS = ['#2563eb','#dc2626','#16a34a','#d97706','#7c3aed','#0891b2','#db2777','#65a30d'];
+        const SC_STRATEGIES = {
+            '1': '一次性投资',
+            '2': '普通定额定投',
+            '3': '价值平均定投(VA)',
+            '4': '均线智能定投',
+            '5': '目标止盈定投',
+            '6': '估值不定额'
+        };
+
+        function setMode(mode) {
+            const combo = document.getElementById('comboBacktestRoot');
+            const sc = document.getElementById('strategyCompareRoot');
+            const bCombo = document.getElementById('modeCombo');
+            const bSc = document.getElementById('modeStrategy');
+            if (mode === 'sc') {
+                combo.style.display = 'none';
+                sc.style.display = 'block';
+                if (scItems.length === 0 && Object.keys(fundsData).length > 0) addScItem();
+            } else {
+                combo.style.display = 'block';
+                sc.style.display = 'none';
+            }
+            const activeClass = 'px-5 py-2 rounded-lg font-medium transition bg-indigo-600 text-white';
+            const idleClass = 'px-5 py-2 rounded-lg font-medium transition bg-gray-200 text-gray-700 hover:bg-gray-300';
+            bCombo.className = mode === 'combo' ? activeClass : idleClass;
+            bSc.className = mode === 'sc' ? activeClass : idleClass;
+        }
+
+        function addScItem() {
+            const funds = Object.keys(fundsData);
+            if (funds.length === 0) { alert('请先在上方「数据管理」中上传基金净值数据'); return; }
+            const f = funds[0];
+            scItems.push({
+                id: 'sc_' + Date.now() + '_' + Math.floor(Math.random() * 1000),
+                fund: f, strategy: '2',
+                freq: 'monthly', weekday: '1', dayOfMonth: '1',
+                baseAmount: 1000,
+                maDays: 250, lowCoef: 1.5, highCoef: 0.5,
+                stopGainPct: 20, stopGainSellRatio: 100,
+                valWindow: 250, valK: 1.0,
+                startDate: fundsData[f].minDate,
+                endDate: fundsData[f].maxDate,
+                div: 'reinvest'
+            });
+            renderScItems();
+        }
+        function deleteScItem(id) { scItems = scItems.filter(x => x.id !== id); renderScItems(); }
+
+        function renderScItems() {
+            const container = document.getElementById('scItemList');
+            if (scItems.length === 0) { container.innerHTML = '<p class="text-gray-500 text-sm">暂无对比条目，点击下方「＋ 添加对比条目」。</p>'; return; }
+            container.innerHTML = scItems.map(scRowHtml).join('');
+            scItems.forEach(item => {
+                const row = container.querySelector('[data-id="' + item.id + '"]');
+                if (!row) return;
+                row.querySelectorAll('[data-field]').forEach(el => {
+                    el.addEventListener('change', e => {
+                        const f = e.target.dataset.field;
+                        let v = e.target.value;
+                        if (e.target.type === 'number') v = parseFloat(v);
+                        item[f] = v;
+                        if (f === 'fund') {
+                            item.startDate = fundsData[v].minDate;
+                            item.endDate = fundsData[v].maxDate;
+                            renderScItems();
+                        } else if (f === 'strategy') {
+                            renderScItems();
+                        }
+                    });
+                });
+                const del = row.querySelector('[data-act="del"]');
+                if (del) del.addEventListener('click', () => deleteScItem(item.id));
+            });
+        }
+
+        function scRowHtml(item) {
+            const fundOpts = Object.keys(fundsData).map(k => `<option value="${k}" ${k === item.fund ? 'selected' : ''}>${k}</option>`).join('');
+            const stratOpts = Object.entries(SC_STRATEGIES).map(([k, v]) => `<option value="${k}" ${k === item.strategy ? 'selected' : ''}>${v}</option>`).join('');
+            const freqOpts = `
+                <option value="weekly" ${item.freq === 'weekly' ? 'selected' : ''}>每周</option>
+                <option value="biweekly" ${item.freq === 'biweekly' ? 'selected' : ''}>每双周</option>
+                <option value="monthly" ${item.freq === 'monthly' ? 'selected' : ''}>每月</option>`;
+            const wdNames = ['周日','周一','周二','周三','周四','周五','周六'];
+            const wdOpts = [1,2,3,4,5,6,0].map(d => `<option value="${d}" ${String(item.weekday) === String(d) ? 'selected' : ''}>${wdNames[d]}</option>`).join('');
+            const domOpts = ['first','1','2','3','4','5','6','7','8','9','10','15','20','28'].map(d => {
+                const t = d === 'first' ? '每月首个交易日' : (d + '号');
+                return `<option value="${d}" ${String(item.dayOfMonth) === String(d) ? 'selected' : ''}>${t}</option>`;
+            }).join('');
+            const divOpts = `<option value="reinvest" ${item.div === 'reinvest' ? 'selected' : ''}>红利再投资</option><option value="cash" ${item.div === 'cash' ? 'selected' : ''}>现金分红</option>`;
+            const needSchedule = item.strategy !== '1';
+            const extra = scExtraHtml(item);
+            return `
+            <div class="border rounded-lg p-3 bg-gray-50" data-id="${item.id}">
+              <div class="grid grid-cols-2 md:grid-cols-6 gap-3 items-end">
+                <div><label class="block text-xs text-gray-600 mb-1">基金</label><select data-field="fund" class="w-full p-2 border rounded-lg text-sm">${fundOpts}</select></div>
+                <div><label class="block text-xs text-gray-600 mb-1">策略</label><select data-field="strategy" class="w-full p-2 border rounded-lg text-sm">${stratOpts}</select></div>
+                <div><label class="block text-xs text-gray-600 mb-1">基础每期金额</label><input type="number" data-field="baseAmount" value="${item.baseAmount}" min="0" class="w-full p-2 border rounded-lg text-sm"></div>
+                <div><label class="block text-xs text-gray-600 mb-1">分红方式</label><select data-field="div" class="w-full p-2 border rounded-lg text-sm">${divOpts}</select></div>
+                <div><label class="block text-xs text-gray-600 mb-1">开始日期</label><input type="date" data-field="startDate" value="${item.startDate}" class="w-full p-2 border rounded-lg text-sm"></div>
+                <div><label class="block text-xs text-gray-600 mb-1">结束日期</label><input type="date" data-field="endDate" value="${item.endDate}" class="w-full p-2 border rounded-lg text-sm"></div>
+              </div>
+              ${needSchedule ? `
+              <div class="grid grid-cols-2 md:grid-cols-4 gap-3 items-end mt-3">
+                <div><label class="block text-xs text-gray-600 mb-1">频率</label><select data-field="freq" class="w-full p-2 border rounded-lg text-sm">${freqOpts}</select></div>
+                <div><label class="block text-xs text-gray-600 mb-1">周几</label><select data-field="weekday" class="w-full p-2 border rounded-lg text-sm">${wdOpts}</select></div>
+                <div><label class="block text-xs text-gray-600 mb-1">每月几号</label><select data-field="dayOfMonth" class="w-full p-2 border rounded-lg text-sm">${domOpts}</select></div>
+                <div class="flex items-end"><span class="text-xs text-gray-400">定投按所选频率执行</span></div>
+              </div>` : ''}
+              ${extra}
+              <div class="mt-2 text-right"><button data-act="del" class="text-red-500 hover:text-red-700 text-sm font-medium">删除此条目</button></div>
+            </div>`;
+        }
+
+        function scExtraHtml(item) {
+            if (item.strategy === '4') {
+                return `<div class="grid grid-cols-2 md:grid-cols-4 gap-3 items-end mt-3 bg-white p-3 rounded-lg border border-indigo-100">
+                    <div class="col-span-4 text-xs font-medium text-indigo-600 mb-1">均线智能定投参数</div>
+                    <div><label class="block text-xs text-gray-600 mb-1">均线天数</label><input type="number" data-field="maDays" value="${item.maDays}" min="5" class="w-full p-2 border rounded-lg text-sm"></div>
+                    <div><label class="block text-xs text-gray-600 mb-1">低位系数(低于均线)</label><input type="number" step="0.1" data-field="lowCoef" value="${item.lowCoef}" class="w-full p-2 border rounded-lg text-sm"></div>
+                    <div><label class="block text-xs text-gray-600 mb-1">高位系数(高于均线)</label><input type="number" step="0.1" data-field="highCoef" value="${item.highCoef}" class="w-full p-2 border rounded-lg text-sm"></div>
+                </div>`;
+            }
+            if (item.strategy === '5') {
+                return `<div class="grid grid-cols-2 md:grid-cols-4 gap-3 items-end mt-3 bg-white p-3 rounded-lg border border-emerald-100">
+                    <div class="col-span-4 text-xs font-medium text-emerald-600 mb-1">目标止盈定投参数</div>
+                    <div><label class="block text-xs text-gray-600 mb-1">止盈阈值(%)</label><input type="number" step="0.5" data-field="stopGainPct" value="${item.stopGainPct}" class="w-full p-2 border rounded-lg text-sm"></div>
+                    <div><label class="block text-xs text-gray-600 mb-1">赎回比例(%)</label><input type="number" step="1" data-field="stopGainSellRatio" value="${item.stopGainSellRatio}" min="0" max="100" class="w-full p-2 border rounded-lg text-sm"></div>
+                </div>`;
+            }
+            if (item.strategy === '6') {
+                return `<div class="grid grid-cols-2 md:grid-cols-4 gap-3 items-end mt-3 bg-white p-3 rounded-lg border border-amber-100">
+                    <div class="col-span-4 text-xs font-medium text-amber-600 mb-1">估值不定额参数（按历史分位调整投入）</div>
+                    <div><label class="block text-xs text-gray-600 mb-1">历史窗口(交易日)</label><input type="number" data-field="valWindow" value="${item.valWindow}" min="20" class="w-full p-2 border rounded-lg text-sm"></div>
+                    <div><label class="block text-xs text-gray-600 mb-1">系数 k</label><input type="number" step="0.1" data-field="valK" value="${item.valK}" class="w-full p-2 border rounded-lg text-sm"></div>
+                </div>`;
+            }
+            return '';
+        }
+
+        // 单条对比条目的策略模拟：复用与组合回测一致的分红/资产/指标口径
+        function simulateStrategy(item) {
+            const fund = fundsData[item.fund];
+            if (!fund) return null;
+            const startTs = new Date(item.startDate + 'T00:00:00').getTime();
+            const endTs = new Date(item.endDate + 'T00:00:00').getTime();
+            if (isNaN(startTs) || isNaN(endTs) || endTs < startTs) return null;
+
+            // 取该基金自身在 [start,end] 内交易日序列（单基金，无需前向填充）
+            const dates = [], dateStrs = [], navs = [], divs = [];
+            for (let i = 0; i < fund.dates.length; i++) {
+                const ts = fund.dates[i].getTime();
+                if (ts >= startTs && ts <= endTs) {
+                    dates.push(new Date(fund.dates[i]));
+                    dateStrs.push(formatDate(fund.dates[i]));
+                    navs.push(fund.nav[i]);
+                    divs.push(fund.div[i] || 0);
+                }
+            }
+            const N = dates.length;
+            if (N < 2) return null;
+
+            const dow = new Array(N), dom = new Array(N);
+            for (let k = 0; k < N; k++) { dow[k] = dates[k].getUTCDay(); dom[k] = parseInt(dateStrs[k].split('-')[2], 10); }
+
+            const reinvest = item.div === 'reinvest';
+            const strat = item.strategy;
+
+            const isInvest = new Array(N).fill(false);
+            if (strat === '1') {
+                isInvest[0] = true;
+            } else {
+                const freq = item.freq;
+                if (freq === 'weekly' || freq === 'biweekly') {
+                    const wd = parseInt(item.weekday);
+                    let firstIdx = -1;
+                    for (let k = 0; k < N; k++) { if (dow[k] === wd) { firstIdx = k; break; } }
+                    if (firstIdx >= 0) {
+                        for (let k = firstIdx; k < N; k++) {
+                            if (dow[k] === wd) {
+                                if (freq === 'biweekly') {
+                                    const weekDiff = Math.round((dates[k] - dates[firstIdx]) / (7 * 86400000));
+                                    if (weekDiff % 2 !== 0) continue;
+                                }
+                                isInvest[k] = true;
+                            }
+                        }
+                    }
+                } else {
+                    if (item.dayOfMonth === 'first') {
+                        let lastMonth = -1;
+                        for (let k = 0; k < N; k++) {
+                            const ym = dateStrs[k].slice(0, 7);
+                            if (ym !== lastMonth) { isInvest[k] = true; lastMonth = ym; }
+                        }
+                    } else {
+                        const domN = parseInt(item.dayOfMonth);
+                        for (let k = 0; k < N; k++) { if (dom[k] === domN) isInvest[k] = true; }
+                    }
+                }
+            }
+            const investIdx = [];
+            for (let k = 0; k < N; k++) if (isInvest[k]) investIdx.push(k);
+            if (investIdx.length === 0) return null;
+
+            let maArr = null;
+            if (strat === '4') {
+                const maDays = Math.max(2, parseInt(item.maDays) || 250);
+                maArr = new Array(N).fill(null);
+                let sum = 0; const q = [];
+                for (let k = 0; k < N; k++) {
+                    sum += navs[k]; q.push(navs[k]);
+                    if (q.length > maDays) sum -= q.shift();
+                    maArr[k] = sum / q.length;
+                }
+            }
+            let pctArr = null;
+            if (strat === '6') {
+                const win = Math.max(5, parseInt(item.valWindow) || 250);
+                pctArr = new Array(N).fill(0.5);
+                const hist = [];
+                for (let k = 0; k < N; k++) {
+                    hist.push(navs[k]);
+                    if (hist.length > win) hist.shift();
+                    const cur = navs[k];
+                    let below = 0;
+                    for (let j = 0; j < hist.length; j++) if (hist[j] <= cur) below++;
+                    pctArr[k] = hist.length > 1 ? below / hist.length : 0.5;
+                }
+            }
+
+            let shares = 0, totalCash = 0, totalInvested = 0, costBasis = 0, stopGainCount = 0, investCount = 0;
+            const cashFlows = [], flowDates = [], assets = [], invests = [], cashDivs = [];
+
+            for (let k = 0; k < N; k++) {
+                const nav = navs[k];
+                const date = dates[k];
+                if (shares > 0 && divs[k] > 0) {
+                    const totalDiv = shares * divs[k];
+                    if (reinvest) shares += totalDiv / nav;
+                    else { totalCash += totalDiv; cashFlows.push(totalDiv); flowDates.push(date); }
+                }
+                let amt = 0;
+                if (isInvest[k]) {
+                    if (strat === '1') amt = item.baseAmount;
+                    else if (strat === '2') amt = item.baseAmount;
+                    else if (strat === '3') { investCount++; amt = investCount * item.baseAmount - shares * nav; }
+                    else if (strat === '4') {
+                        const ma = maArr[k];
+                        let factor = 1;
+                        if (ma !== null && ma > 0) factor = nav < ma ? parseFloat(item.lowCoef) : parseFloat(item.highCoef);
+                        amt = item.baseAmount * factor;
+                    } else if (strat === '5') amt = item.baseAmount;
+                    else if (strat === '6') { const factor = 1 + (0.5 - pctArr[k]) * parseFloat(item.valK); amt = item.baseAmount * factor; }
+                }
+                // 目标止盈：每日检查累计收益，达阈值则赎回设定比例并继续定投
+                if (strat === '5') {
+                    const th = parseFloat(item.stopGainPct) / 100;
+                    const sellRatio = Math.min(1, Math.max(0, parseFloat(item.stopGainSellRatio) / 100));
+                    if (costBasis > 0 && sellRatio > 0) {
+                        const mvNow = shares * nav + totalCash;
+                        if ((mvNow - costBasis) / costBasis >= th) {
+                            const sellShares = shares * sellRatio;
+                            const proceeds = sellShares * nav;
+                            shares -= sellShares; totalCash += proceeds;
+                            cashFlows.push(proceeds); flowDates.push(date);
+                            costBasis *= (1 - sellRatio);
+                            stopGainCount++;
+                        }
+                    }
+                }
+                if (amt !== 0 && isInvest[k]) {
+                    if (amt > 0) {
+                        shares += amt / nav; totalInvested += amt; costBasis += amt;
+                        cashFlows.push(-amt); flowDates.push(date);
+                    } else {
+                        let sellShares = (-amt) / nav;
+                        if (sellShares > shares) sellShares = shares;
+                        if (sellShares > 0) {
+                            const proceeds = sellShares * nav;
+                            shares -= sellShares; totalCash += proceeds;
+                            cashFlows.push(proceeds); flowDates.push(date);
+                            const denom = shares + sellShares;
+                            if (denom > 0) costBasis *= shares / denom;
+                        }
+                    }
+                }
+                assets.push(shares * nav + totalCash);
+                invests.push(amt > 0 ? amt : 0);
+                cashDivs.push(totalCash);
+            }
+
+            const finalDate = dates[N - 1];
+            const finalAsset = assets[N - 1];
+            cashFlows.push(finalAsset); flowDates.push(finalDate);
+            const xirrVal = xirr(cashFlows, flowDates) * 100;
+            const totalReturn = totalInvested > 0 ? (finalAsset / totalInvested - 1) * 100 : 0;
+            const m = computeMetrics(dates, assets, invests);
+            return { item, dates, assets, invests, cashDivs, totalInvested, finalAsset, totalReturn, xirrVal, stopGainCount, metrics: m };
+        }
+
+        function runStrategyCompare() {
+            if (scItems.length === 0) { alert('请先添加对比条目'); return; }
+            const fundsInItems = [...new Set(scItems.map(x => x.fund))];
+            scCommonStart = null;
+            let commonStart = null, commonEnd = null;
+            if (fundsInItems.length > 1) {
+                // 多基金对比：以历史较短基金的可用区间为准（其起始日期即比较最早起点）
+                let maxMin = -Infinity, minMax = Infinity;
+                fundsInItems.forEach(f => {
+                    const fd = fundsData[f];
+                    const mn = new Date(fd.minDate + 'T00:00:00').getTime();
+                    const mx = new Date(fd.maxDate + 'T00:00:00').getTime();
+                    if (mn > maxMin) maxMin = mn;
+                    if (mx < minMax) minMax = mx;
+                });
+                commonStart = maxMin; commonEnd = minMax; scCommonStart = commonStart;
+            }
+            scResults = [];
+            const errors = [];
+            scItems.forEach(item => {
+                const eff = Object.assign({}, item);
+                if (commonStart !== null) {
+                    const st = new Date(item.startDate + 'T00:00:00').getTime();
+                    const en = new Date(item.endDate + 'T00:00:00').getTime();
+                    eff.startDate = formatDate(new Date(Math.max(st, commonStart)));
+                    eff.endDate = formatDate(new Date(Math.min(en, commonEnd)));
+                }
+                const r = simulateStrategy(eff);
+                if (!r) { errors.push((fundCodeName(item.fund).name || item.fund) + '·' + SC_STRATEGIES[item.strategy] + '：区间数据不足'); return; }
+                scResults.push(r);
+            });
+            if (scResults.length === 0) { alert('没有可运行的对比条目：' + errors.join('；')); return; }
+            renderScResults(errors);
+        }
+
+        function renderScResults(errors) {
+            const tbody = document.getElementById('scTableBody');
+            let rows = '';
+            scResults.forEach(r => {
+                const it = r.item; const m = r.metrics; const cn = fundCodeName(it.fund);
+                rows += `<tr class="border-b hover:bg-gray-50">
+                    <td class="px-2 py-2 text-center font-mono text-xs">${cn.code}</td>
+                    <td class="px-2 py-2 text-center text-sm">${cn.name || cn.code}</td>
+                    <td class="px-2 py-2 text-center text-sm">${SC_STRATEGIES[it.strategy]}</td>
+                    <td class="px-2 py-2 text-right text-sm">${r.totalInvested.toFixed(0)}</td>
+                    <td class="px-2 py-2 text-right text-sm">${r.finalAsset.toFixed(0)}</td>
+                    <td class="px-2 py-2 text-right text-sm ${r.totalReturn >= 0 ? 'text-emerald-600 font-medium' : 'text-rose-600 font-medium'}">${r.totalReturn.toFixed(2)}%</td>
+                    <td class="px-2 py-2 text-right text-sm">${isNaN(r.xirrVal) ? '-' : r.xirrVal.toFixed(2) + '%'}</td>
+                    <td class="px-2 py-2 text-right text-sm">${isNaN(m.maxDrawdown) ? '-' : m.maxDrawdown.toFixed(2) + '%'}</td>
+                    <td class="px-2 py-2 text-right text-sm">${isNaN(m.annualVolatility) ? '-' : (m.annualVolatility * 100).toFixed(2) + '%'}</td>
+                    <td class="px-2 py-2 text-right text-sm">${isNaN(m.sharpeRatio) ? '-' : m.sharpeRatio.toFixed(2)}</td>
+                    <td class="px-2 py-2 text-right text-sm">${it.strategy === '5' ? r.stopGainCount : '—'}</td>
+                </tr>`;
+            });
+            tbody.innerHTML = rows;
+
+            document.getElementById('scRules').innerHTML = scResults.map(r => {
+                const it = r.item; const cn = fundCodeName(it.fund);
+                return `<div class="text-sm"><span class="font-medium">${cn.name || it.fund} · ${SC_STRATEGIES[it.strategy]}：</span>${scRuleText(it)}</div>`;
+            }).join('');
+
+            let errHtml = '';
+            if (errors.length) errHtml += '<p class="text-amber-600 text-sm mt-2">⚠ ' + errors.join('；') + '</p>';
+            if (scCommonStart !== null) errHtml += '<p class="text-xs text-gray-400 mt-1">* 多基金对比：各条目区间已对齐至历史较短基金的可用区间（' + formatDate(new Date(scCommonStart)) + ' 起）。</p>';
+            document.getElementById('scErrors').innerHTML = errHtml;
+
+            const metricsGrid = document.getElementById('scMetrics');
+            metricsGrid.innerHTML = scResults.map(r => {
+                const cardBg = r.totalReturn >= 0 ? 'bg-emerald-50' : 'bg-rose-50';
+                const cardText = r.totalReturn >= 0 ? 'text-emerald-700' : 'text-rose-600';
+                const cn = fundCodeName(r.item.fund);
+                return `<div class="${cardBg} p-3 rounded-lg text-center">
+                    <div class="text-xs text-gray-500">${cn.name || r.item.fund} · ${SC_STRATEGIES[r.item.strategy]}</div>
+                    <div class="text-lg font-bold ${cardText}">${r.totalReturn.toFixed(2)}%</div>
+                    <div class="text-xs text-gray-500">累计收益 / XIRR ${isNaN(r.xirrVal) ? '-' : r.xirrVal.toFixed(1) + '%'}</div>
+                </div>`;
+            }).join('');
+
+            document.getElementById('scResultArea').classList.remove('hidden');
+            drawScChart();
+        }
+
+        function scRuleText(it) {
+            const wdNames = ['周日','周一','周二','周三','周四','周五','周六'];
+            const freqText = it.strategy === '1' ? '一次性' :
+                (it.freq === 'weekly' ? '每周' + wdNames[+it.weekday] + '定投' :
+                 it.freq === 'biweekly' ? '每双周' + wdNames[+it.weekday] + '定投' :
+                 '每月' + (it.dayOfMonth === 'first' ? '首个交易日' : it.dayOfMonth + '号') + '定投');
+            switch (it.strategy) {
+                case '1': return `起始日一次性投入 ${it.baseAmount} 元，之后不再投入。`;
+                case '2': return `每期固定投入 ${it.baseAmount} 元（${freqText}）。`;
+                case '3': return `价值平均：目标市值每期递增 ${it.baseAmount} 元，低于目标多买、高于目标卖出。`;
+                case '4': return `均线智能：净值低于 ${it.maDays} 日均线时投入 ×${it.lowCoef}，高于时 ×${it.highCoef}（基准每期 ${it.baseAmount} 元）。`;
+                case '5': return `普通定投（每期 ${it.baseAmount} 元，${freqText}），累计收益达 ${it.stopGainPct}% 时赎回 ${it.stopGainSellRatio}% 份额并继续定投。`;
+                case '6': return `估值不定额：按近 ${it.valWindow} 交易日净值分位调整投入，系数 k=${it.valK}（基准每期 ${it.baseAmount} 元）。`;
+            }
+            return '';
+        }
+
+        function drawScChart() {
+            const canvas = document.getElementById('scChart');
+            if (!canvas) return;
+            if (scChart) scChart.destroy();
+            const datasets = scResults.map((r, idx) => {
+                const startTs = r.dates[0].getTime();
+                const pts = r.dates.map((d, i) => {
+                    const months = (d.getTime() - startTs) / (1000 * 60 * 60 * 24 * 30.4375);
+                    const norm = r.assets[i] / (r.assets[0] || 1);
+                    return { x: +months.toFixed(2), y: +norm.toFixed(4) };
+                });
+                const color = SC_COLORS[idx % SC_COLORS.length];
+                const cn = fundCodeName(r.item.fund);
+                return {
+                    label: (cn.name || r.item.fund) + '·' + SC_STRATEGIES[r.item.strategy],
+                    data: pts, borderColor: color, backgroundColor: color,
+                    borderWidth: 2, pointRadius: 0, tension: 0.1, fill: false
+                };
+            });
+            scChart = new Chart(canvas.getContext('2d'), {
+                type: 'line',
+                data: { datasets },
+                options: {
+                    responsive: true, maintainAspectRatio: false,
+                    interaction: { mode: 'nearest', intersect: false },
+                    scales: {
+                        x: { type: 'linear', title: { display: true, text: '持有期（月）' }, ticks: { callback: v => v + '月' } },
+                        y: { title: { display: true, text: '归一化总资产（起点=1.0）' } }
+                    },
+                    plugins: {
+                        legend: { position: 'bottom' },
+                        tooltip: { callbacks: { title: items => items[0].parsed.x + ' 月' } }
+                    }
+                }
+            });
+        }
+
+        // 工具栏事件绑定
+        document.getElementById('exportProjectBtn').addEventListener('click', exportProject);
+        document.getElementById('importProjectBtn').addEventListener('click', function () { document.getElementById('importProjectFile').click(); });
+        document.getElementById('importProjectFile').addEventListener('change', function (e) { const f = e.target.files[0]; if (f) importProject(f); e.target.value = ''; });
+        document.getElementById('reportHtmlBtn').addEventListener('click', exportReportHTML);
