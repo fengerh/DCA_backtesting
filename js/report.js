@@ -9,6 +9,12 @@ const REPORT_VERSION = '20260708';
 const CHART_JS_CDN = 'https://cdn.jsdelivr.net/npm/chart.js@4.4.1/dist/chart.umd.min.js';
 const TAILWIND_CDN = 'https://cdn.tailwindcss.com';
 
+// 策略比较报告导出用的图表标题 / 说明文案（与 strategy.js 的 setScYMode 保持一致）
+const SC_XIRR_TITLE = '投资收益率曲线（资金加权 XIRR 年化，%）';
+const SC_NET_TITLE = '投资净值曲线（资金加权，起点=1.0）';
+const SC_XIRR_NOTE = '* 采用资金加权的 XIRR 年化收益率（与策略对比表"XIRR年化"同口径，曲线终点=该值）：每日净外部现金流 = −当日投入 + 当日落袋现金（赎回/现金分红），期末价值只计剩余持仓市值，已落袋现金此前已作正流避免重复计数。该口径不受持续定投稀释，能直接看到资金加权年化随时间的真实走势；止盈赎回作为正流计入，曲线不会因赎回而假跌。可切换"按持有期月数对齐"或"按日期"调整 x 轴。';
+const SC_NET_NOTE = '* 采用资金加权的"这一笔投资净值"（起点=1.0）：当日净值 = 当日总资产 ÷ 截至当日的累计已投入本金。该口径保留了投入节奏的影响——上涨市中单笔（一次投入）会跑在定投（分批投入）上方，能直接看出策略差异；可切换"按持有期月数对齐"（各条目从0月对齐便于跨条目对比）或"按日期"（按真实日历日期错开显示），并可在"净值 / XIRR年化"间切换 y 轴口径。';
+
 // 序列化 / 反序列化 fundsData（Date <-> yyyy-mm-dd）
 function serializeFunds(fd) {
     const out = {};
@@ -82,23 +88,9 @@ async function importProject(file) {
     }
     currentBenchmarkId = snap.currentBenchmarkId != null ? idMap[snap.currentBenchmarkId] : null;
 
-    const fundSelect = document.getElementById('fundSelect');
-    fundSelect.innerHTML = '';
-    Object.keys(fundsData).forEach(function (code) {
-        const opt = document.createElement('option'); opt.value = code; opt.textContent = code; fundSelect.appendChild(opt);
-    });
-    let infoHtml = '<div class="font-medium text-green-600 mb-2">✅ 已加载基金（来自项目）：</div><ul class="list-disc list-inside space-y-1">';
-    Object.keys(fundsData).forEach(function (code) {
-        const f = fundsData[code];
-        infoHtml += '<li><strong>' + code + '</strong>：' + f.minDate + ' ~ ' + f.maxDate + '</li>';
-    });
-    infoHtml += '</ul>';
-    document.getElementById('fundInfo').innerHTML = infoHtml;
-
     if (Object.keys(fundsData).length) {
-        document.getElementById('planSection').style.display = 'block';
-        document.getElementById('planListSection').style.display = 'block';
-        document.getElementById('resultSection').style.display = 'block';
+        const pls = document.getElementById('planListSection'); if (pls) pls.style.display = 'block';
+        const rs = document.getElementById('resultSection'); if (rs) rs.style.display = 'block';
     }
     renderPlanList();
     await loadBenchmarkList();
@@ -235,12 +227,13 @@ function buildReportInner() {
         const assets = RD.reportData.assets.slice(i0, i1 + 1);
         const invests = (RD.reportData.invests || []).slice(i0, i1 + 1);
         const cashDivs = RD.reportData.cashDivs || [];
+        const totalCashSeries = RD.reportData.totalCashSeries || [];
         const wDates = dates.slice(i0, i1 + 1);
         const n = nvs.length;
         const windowDays = (dates[i1] - dates[i0]) / 86400000;
 
         const intervalPrincipal = invests.reduce(function (a, b) { return a + (b || 0); }, 0);
-        const mvEnd = assets[n - 1] - (cashDivs[i1] || 0);
+        const mvEnd = assets[n - 1] - (totalCashSeries[i1] || 0);
         const cashDivInterval = (cashDivs[i1] || 0) - (i0 > 0 ? (cashDivs[i0 - 1] || 0) : 0);
         const totalAssetEnd = assets[n - 1];
 
@@ -517,13 +510,16 @@ function buildReportInner() {
 
 // 导出交互式 HTML 报告（Chart.js 内联，纯离线；Tailwind CDN；内嵌全部基准可切换）
 async function exportReportHTML() {
+    // 按当前模式分流：策略比较模式导出策略对比报告
+    if (currentMode === 'sc') { await exportScReportHTML(); return; }
     if (!backtestResult.dates || backtestResult.dates.length === 0) { alert('请先运行回测再导出报告'); return; }
     const reportData = {
         dates: backtestResult.dates.map(function (d) { return formatDate(d); }),
         assets: backtestResult.assets,
         netValues: backtestResult.netValues,
         invests: backtestResult.invests || [],
-        cashDivs: backtestResult.cashDivs || []
+        cashDivs: backtestResult.cashDivs || [],
+        totalCashSeries: backtestResult.totalCashSeries || []
     };
     const benchmarksAll = await db.benchmarks.toArray();
     const benchmarksData = benchmarksAll.map(function (b) { return { id: b.id, name: b.name, data: b.data }; });
@@ -710,4 +706,188 @@ async function exportReportHTML() {
     document.body.appendChild(a); a.click(); a.remove();
     URL.revokeObjectURL(url);
 }
+
+// 导出「定投策略比较」交互式 HTML 报告
+// 曲线图内联 Chart.js 重绘，并保留「按持有期月数/按日期」「净值/XIRR年化」切换功能（导出文件内可实时切换）
+async function exportScReportHTML() {
+    if (!scResults || scResults.length === 0) { alert('请先运行策略比较再导出报告'); return; }
+    if (!scChart) { alert('请先运行策略比较再导出报告'); return; }
+
+    // 序列化「原始数据」而非已计算的数据集，以便在导出文件里复刻 drawScChart 的切换重算
+    const scRaw = {
+        initX: scChartXMode,
+        initY: scChartYMode,
+        xirrTitle: SC_XIRR_TITLE,
+        netTitle: SC_NET_TITLE,
+        xirrNote: SC_XIRR_NOTE,
+        netNote: SC_NET_NOTE,
+        results: scResults.map(function (r, idx) {
+            if (!r._runningXirr) r._runningXirr = runningXirr(r);
+            const cn = fundCodeName(r.item.fund);
+            const isStopGain = r.item.strategy === '5';
+            return {
+                dates: r.dates.map(function (d) { return d.getTime(); }),
+                invests: r.invests || [],
+                assets: r.assets || [],
+                peakPrincipal: r.peakPrincipal || [],
+                stopGainEvents: r.stopGainEvents || [],
+                runningXirr: r._runningXirr || [],
+                label: (cn.name || r.item.fund) + '·' + SC_STRATEGIES[r.item.strategy],
+                color: SC_COLORS[idx % SC_COLORS.length],
+                isStopGain: isStopGain
+            };
+        })
+    };
+
+    // 内联 Chart.js（优先内联，失败则外链 CDN）
+    let chartJsSrc = '';
+    try { chartJsSrc = await (await fetch(CHART_JS_CDN)).text(); } catch (e) { chartJsSrc = ''; }
+    let chartJsBlock;
+    if (chartJsSrc) chartJsBlock = '<scr' + 'ipt>' + chartJsSrc.replace(/<\/script>/gi, '<\\/script>') + '</scr' + 'ipt>';
+    else chartJsBlock = '<scr' + 'ipt src="' + CHART_JS_CDN + '"></scr' + 'ipt>';
+
+    // 抓取当前已渲染的视图快照（指标卡/对比表/规则/提示）
+    const metricsHtml = document.getElementById('scMetrics') ? document.getElementById('scMetrics').innerHTML : '';
+    const tableEl = document.querySelector('#scResultArea table');
+    const tableHtml = tableEl ? tableEl.outerHTML : '';
+    const rulesEl = document.getElementById('scRules');
+    const rulesHtml = rulesEl ? rulesEl.innerHTML : '';
+    const errorsEl = document.getElementById('scErrors');
+    const errorsHtml = errorsEl ? errorsEl.innerHTML : '';
+    const dateStr = formatDate(new Date());
+
+    const html = '<!DOCTYPE html>\n' +
+        '<html lang="zh-CN">\n' +
+        '<head>\n' +
+        '    <meta charset="UTF-8">\n' +
+        '    <meta name="viewport" content="width=device-width, initial-scale=1.0">\n' +
+        '    <title>定投策略比较报告</title>\n' +
+        '    <scr' + 'ipt src="' + TAILWIND_CDN + '"></scr' + 'ipt>\n' +
+        '    ' + chartJsBlock + '\n' +
+        '</head>\n' +
+        '<body class="bg-gray-50 min-h-screen p-6">\n' +
+        '    <div class="max-w-6xl mx-auto">\n' +
+        '        <h1 class="text-3xl font-bold text-center mb-8 text-gray-800">📊 定投策略比较报告</h1>\n' +
+        '        <p class="text-center text-sm text-gray-400 mb-8">生成日期：' + dateStr + '（曲线图支持鼠标悬停查看各点数值，并可切换 X 轴与 Y 轴口径）</p>\n' +
+        // 指标卡（常开）
+        (metricsHtml ? '        <div class="bg-white p-6 rounded-xl shadow-md mb-6">\n' +
+            '            <h3 class="text-lg font-semibold text-gray-700 mb-3">策略指标对比</h3>\n' +
+            '            <div class="grid grid-cols-2 md:grid-cols-4 gap-4">' + metricsHtml + '</div>\n' +
+            '        </div>\n' : '') +
+        // 曲线图（常开，带切换按钮，交互式）
+        '        <div class="bg-white p-6 rounded-xl shadow-md mb-6">\n' +
+        '            <div class="flex flex-wrap items-center justify-between gap-2 mb-3">\n' +
+        '                <h3 id="scExpTitle" class="text-lg font-semibold text-gray-700"></h3>\n' +
+        '                <div class="flex flex-wrap gap-2">\n' +
+        '                    <button id="expXMonth" onclick="scSetX(\'month\')" class="px-3 py-1.5 bg-blue-600 text-white text-sm rounded">按持有期月数对齐</button>\n' +
+        '                    <button id="expXDate" onclick="scSetX(\'date\')" class="px-3 py-1.5 bg-white text-gray-700 hover:bg-gray-100 text-sm rounded">按日期</button>\n' +
+        '                    <button id="expYNet" onclick="scSetY(\'net\')" class="px-3 py-1.5 bg-blue-600 text-white text-sm rounded">净值</button>\n' +
+        '                    <button id="expYXirr" onclick="scSetY(\'xirr\')" class="px-3 py-1.5 bg-white text-gray-700 hover:bg-gray-100 text-sm rounded">XIRR年化</button>\n' +
+        '                </div>\n' +
+        '            </div>\n' +
+        '            <div style="height: 420px;"><canvas id="scChartExport"></canvas></div>\n' +
+        '            <p id="scExpNote" class="text-xs text-gray-500 mt-2"></p>\n' +
+        '        </div>\n' +
+        // 对比表（常开）
+        (tableHtml ? '        <div class="bg-white p-6 rounded-xl shadow-md mb-6">\n' +
+            '            <h3 class="text-lg font-semibold text-gray-700 mb-3">策略对比明细</h3>\n' +
+            '            <div class="overflow-x-auto">' + tableHtml + '</div>\n' +
+            '        </div>\n' : '') +
+        // 规则（常开）
+        (rulesHtml ? '        <div class="bg-white p-6 rounded-xl shadow-md mb-6">\n' +
+            '            <h3 class="text-lg font-semibold text-gray-700 mb-3">策略规则说明</h3>\n' +
+            rulesHtml + '\n' +
+            '        </div>\n' : '') +
+        // 错误/提示（常开）
+        (errorsHtml ? '        <div class="bg-white p-6 rounded-xl shadow-md mb-6">\n' +
+            '            <h3 class="text-lg font-semibold text-gray-700 mb-3">提示与说明</h3>\n' +
+            errorsHtml + '\n' +
+            '        </div>\n' : '') +
+        '        <p class="text-center text-xs text-gray-400 mt-4">本报告由「基金定投测算工具」生成，曲线图可在浏览器中交互切换。</p>\n' +
+        '    </div>\n' +
+        '    <scr' + 'ipt>window.__sc__ = ' + JSON.stringify(scRaw).replace(/<\/script>/gi, '<\\/script>') + ';</scr' + 'ipt>\n' +
+        '    <scr' + 'ipt>\n' +
+        '        var __sc = window.__sc__;\n' +
+        '        var __x = __sc.initX, __y = __sc.initY;\n' +
+        '        var __hasSG = __sc.results.some(function (r) { return r.isStopGain; });\n' +
+        '        var __chart = null;\n' +
+        '        var __on = "px-3 py-1.5 bg-blue-600 text-white text-sm rounded";\n' +
+        '        var __off = "px-3 py-1.5 bg-white text-gray-700 hover:bg-gray-100 text-sm rounded";\n' +
+        '        function __fmt(d) { var t = new Date(d); if (isNaN(t)) return d; var y = t.getFullYear(); var m = ("0" + (t.getMonth() + 1)).slice(-2); var day = ("0" + t.getDate()).slice(-2); return y + "-" + m + "-" + day; }\n' +
+        '        function __build(xMode, yMode) {\n' +
+        '            var isXirr = yMode === "xirr";\n' +
+        '            var ds = [];\n' +
+        '            __sc.results.forEach(function (r) {\n' +
+        '                var startTs = r.dates[0]; var cum = 0;\n' +
+        '                var pts = [], sgPts = [];\n' +
+        '                var sgSet = (r.isStopGain && r.stopGainEvents.length) ? new Set(r.stopGainEvents) : null;\n' +
+        '                r.dates.forEach(function (ts, i) {\n' +
+        '                    cum += (r.invests[i] || 0);\n' +
+        '                    var months = (ts - startTs) / (1000 * 60 * 60 * 24 * 30.4375);\n' +
+        '                    var yVal;\n' +
+        '                    if (isXirr) { var v = r.runningXirr[i]; if (v == null) return; yVal = +v.toFixed(2); }\n' +
+        '                    else {\n' +
+        '                        var nv;\n' +
+        '                        if (r.isStopGain) { var peak = r.peakPrincipal[i]; nv = peak > 0 ? 1 + (r.assets[i] - cum) / peak : null; }\n' +
+        '                        else { nv = cum > 0 ? r.assets[i] / cum : null; }\n' +
+        '                        if (nv == null) return; yVal = +nv.toFixed(4);\n' +
+        '                    }\n' +
+        '                    var xVal = xMode === "date" ? ts : +months.toFixed(2);\n' +
+        '                    pts.push({ x: xVal, y: yVal });\n' +
+        '                    if (sgSet && sgSet.has(i)) sgPts.push({ x: xVal, y: yVal });\n' +
+        '                });\n' +
+        '                ds.push({ label: r.label, data: pts, borderColor: r.color, backgroundColor: r.color, borderWidth: 2, pointRadius: 0, tension: 0.1, fill: false });\n' +
+        '                if (sgPts.length) ds.push({ label: r.label + "·止盈点", data: sgPts, borderColor: r.color, backgroundColor: r.color, pointStyle: "circle", pointRadius: 4, pointHoverRadius: 6, pointBorderColor: "#ffffff", pointBorderWidth: 1.5, showLine: false, fill: false, isStopGainMarker: true });\n' +
+        '            });\n' +
+        '            return ds;\n' +
+        '        }\n' +
+        '        function __render() {\n' +
+        '            var isXirr = __y === "xirr"; var isDate = __x === "date";\n' +
+        '            var ds = __build(__x, __y);\n' +
+        '            var xMin = Infinity, xMax = -Infinity;\n' +
+        '            ds.forEach(function (d) { d.data.forEach(function (p) { if (p.x != null && isFinite(p.x)) { if (p.x < xMin) xMin = p.x; if (p.x > xMax) xMax = p.x; } }); });\n' +
+        '            if (!isFinite(xMin)) { xMin = undefined; xMax = undefined; }\n' +
+        '            if (__chart) __chart.destroy();\n' +
+        '            var ctx = document.getElementById("scChartExport").getContext("2d");\n' +
+        '            __chart = new Chart(ctx, {\n' +
+        '                type: "line", data: { datasets: ds }, options: {\n' +
+        '                    responsive: true, maintainAspectRatio: false,\n' +
+        '                    interaction: { mode: "nearest", intersect: false },\n' +
+        '                    scales: {\n' +
+        '                        x: { type: "linear", min: xMin, max: xMax,\n' +
+        '                            title: { display: true, text: isDate ? "日期" : "持有期（月）" },\n' +
+        '                            ticks: { maxTicksLimit: 12, callback: function (v) { return isDate ? __fmt(new Date(v)) : v + "月"; } } },\n' +
+        '                        y: { title: { display: true, text: isXirr\n' +
+        '                            ? "资金加权收益率 XIRR 年化（%）"\n' +
+        '                            : (__hasSG ? "投资净值（普通策略=总资产/累计投入；止盈策略=1+最大本金收益率，起点=1.0）" : "投资净值（资金加权，总资产/累计投入，起点=1.0）") } }\n' +
+        '                    },\n' +
+        '                    plugins: {\n' +
+        '                        legend: { position: "bottom", labels: { filter: function (item, data) { return !data.datasets[item.datasetIndex].isStopGainMarker; } } },\n' +
+        '                        tooltip: { callbacks: {\n' +
+        '                            title: function (items) { return isDate ? __fmt(new Date(items[0].parsed.x)) : (items[0].parsed.x + " 月"); },\n' +
+        '                            label: function (item) { return item.dataset.isStopGainMarker ? item.dataset.label : (isXirr ? item.parsed.y.toFixed(2) + "%" : item.parsed.y.toFixed(4)); }\n' +
+        '                        } }\n' +
+        '                    }\n' +
+        '                }\n' +
+        '            });\n' +
+        '        }\n' +
+        '        function __applyX(m) { __x = m; document.getElementById("expXMonth").className = m === "month" ? __on : __off; document.getElementById("expXDate").className = m === "date" ? __on : __off; }\n' +
+        '        function __applyY(m) { __y = m; document.getElementById("expYNet").className = m === "net" ? __on : __off; document.getElementById("expYXirr").className = m === "xirr" ? __on : __off; var t = document.getElementById("scExpTitle"); if (t) t.textContent = m === "xirr" ? __sc.xirrTitle : __sc.netTitle; var n = document.getElementById("scExpNote"); if (n) n.textContent = m === "xirr" ? __sc.xirrNote : __sc.netNote; }\n' +
+        '        function scSetX(m) { __applyX(m); __render(); }\n' +
+        '        function scSetY(m) { __applyY(m); __render(); }\n' +
+        '        (function () { __applyX(__x); __applyY(__y); __render(); })();\n' +
+        '    </scr' + 'ipt>\n' +
+        '</body>\n' +
+        '</html>';
+
+    const blob = new Blob([html], { type: 'text/html;charset=utf-8' });
+    const url = URL.createObjectURL(blob);
+    const a = document.createElement('a');
+    a.href = url;
+    a.download = '策略比较报告_' + dateStr + '.html';
+    document.body.appendChild(a); a.click(); a.remove();
+    URL.revokeObjectURL(url);
+}
+
+
 

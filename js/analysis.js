@@ -514,11 +514,26 @@ function renderCorrelationMatrix() {
 async function updateCharts() {
     const startDate = new Date(document.getElementById('chartStartDate').value);
     const endDate = new Date(document.getElementById('chartEndDate').value);
-    const filtered = backtestResult.dates.map((d,i)=>({date:d, asset:backtestResult.assets[i], nv:backtestResult.netValues[i]}))
+
+    // 与全量日期对齐的止盈累计赎回序列（按日期窗口截取时自然对齐）
+    const redeemedCumFull = new Array(backtestResult.dates.length).fill(0);
+    if (backtestResult.stopGainEvents && backtestResult.stopGainEvents.length) {
+        const idxMap = new Map();
+        backtestResult.stopGainEvents.forEach(function(e) {
+            const di = backtestResult.dates.findIndex(d => formatDate(d) === e.dateStr);
+            if (di >= 0) idxMap.set(di, (idxMap.get(di) || 0) + e.proceeds);
+        });
+        let run = 0;
+        for (let i = 0; i < redeemedCumFull.length; i++) { if (idxMap.has(i)) run += idxMap.get(i); redeemedCumFull[i] = run; }
+    }
+
+    const filtered = backtestResult.dates.map((d,i)=>({date:d, asset:backtestResult.assets[i], nv:backtestResult.netValues[i], cashDiv:(backtestResult.cashDivs||[])[i]||0, redeemed:redeemedCumFull[i]}))
         .filter(item => item.date >= startDate && item.date <= endDate);
     const chartDates = filtered.map(d => formatDate(d.date));
     const chartAssets = filtered.map(d => d.asset);
     const chartNetValues = filtered.map(d => d.nv);
+    const chartCashDivs = filtered.map(d => d.cashDiv);
+    const chartRedeemed = filtered.map(d => d.redeemed);
 
     // 止盈触发标注：按日期聚合各基金止盈事件，与图表日期对齐
     const stopGainByDate = new Map();
@@ -697,6 +712,11 @@ async function updateCharts() {
         label: '总资产', data: chartAssets, borderColor: '#3b82f6',
         backgroundColor: 'rgba(59,130,246,0.1)', fill: true, tension: 0.1, pointRadius: 0
     }];
+    // 现金红利金额（逐日累计，始终显示）
+    assetDatasets.push({
+        label: '现金红利金额', data: chartCashDivs, borderColor: '#f59e0b',
+        backgroundColor: 'transparent', fill: false, tension: 0.1, pointRadius: 0
+    });
     if (hasStopGain) {
         assetDatasets.push({
             label: '止盈触发',
@@ -708,6 +728,15 @@ async function updateCharts() {
             backgroundColor: '#ef4444',
             borderColor: '#ef4444',
             isStopGainMarker: true
+        });
+        // 止盈金额（累计赎回，台阶式上升）
+        assetDatasets.push({
+            label: '止盈金额(累计赎回)',
+            data: chartRedeemed,
+            borderColor: '#ef4444',
+            backgroundColor: 'transparent',
+            fill: false, tension: 0, pointRadius: 0,
+            borderWidth: 2
         });
     }
     assetChart = new Chart(assetCtx, {
@@ -766,13 +795,14 @@ function renderPeriodMetrics() {
     const assets = backtestResult.assets.slice(i0, i1 + 1);
     const invests = (backtestResult.invests || []).slice(i0, i1 + 1);
     const cashDivs = backtestResult.cashDivs || [];
+    const totalCashSeries = backtestResult.totalCashSeries || [];
     const wDates = dates.slice(i0, i1 + 1);
     const n = nvs.length;
     const windowDays = (dates[i1] - dates[i0]) / 86400000;
 
     // 快照类（区间口径）
     const intervalPrincipal = invests.reduce((a, b) => a + (b || 0), 0);
-    const mvEnd = assets[n - 1] - (cashDivs[i1] || 0);
+    const mvEnd = assets[n - 1] - (totalCashSeries[i1] || 0);
     const cashDivInterval = (cashDivs[i1] || 0) - (i0 > 0 ? (cashDivs[i0 - 1] || 0) : 0);
     const totalAssetEnd = assets[n - 1];
 

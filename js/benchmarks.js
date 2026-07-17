@@ -29,6 +29,7 @@ async function refreshBenchmarkCache() {
 async function loadBenchmarkList() {
     compositeWeights = {}; // 新增：每次刷新基准列表时清空临时权重
     const benchmarks = await db.benchmarks.toArray();
+    benchmarks.sort((a, b) => (a.order || 0) - (b.order || 0));
     // 未选中任何基准时，默认选中第一个（写入顺序首条），使"基准指数工作日检测"立即生效
     if (!currentBenchmarkId && benchmarks.length > 0) currentBenchmarkId = benchmarks[0].id;
     const container = document.getElementById('benchmarkList');
@@ -95,6 +96,7 @@ async function loadBenchmarkList() {
 // 渲染合成基准的权重输入界面
 async function renderCompositePanel() {
     const benchmarks = await db.benchmarks.toArray();
+    benchmarks.sort((a, b) => (a.order || 0) - (b.order || 0));
     const container = document.getElementById('compositeWeightsContainer');
     if (benchmarks.length === 0) {
         container.innerHTML = '<p class="text-gray-400 text-sm">暂无基准数据，请先上传基准</p>';
@@ -146,6 +148,7 @@ function setEqualWeights() {
 // 生成合成基准
 async function generateCompositeBenchmark() {
     const benchmarks = await db.benchmarks.toArray();
+    benchmarks.sort((a, b) => (a.order || 0) - (b.order || 0));
     const activeIds = Object.keys(compositeWeights).filter(id => compositeWeights[id] > 0);
     if (activeIds.length === 0) {
         alert('至少需要一个基准权重 > 0');
@@ -302,8 +305,12 @@ document.getElementById('uploadBenchmarkBtn').addEventListener('click', async ()
         const workbook = XLSX.read(data, { type: 'array', cellDates: true });
         const sheetNames = workbook.SheetNames;
         if (sheetNames.length === 0) { alert('Excel 文件中没有 Sheet'); return; }
+        // 按 Excel 工作表顺序累加 order，使多次上传按序追加、表内保持工作表顺序
+        const existing = await db.benchmarks.toArray();
+        const maxOrder = existing.length ? Math.max.apply(null, existing.map(b => b.order || 0)) : 0;
         let importCount = 0;
-        for (const sheetName of sheetNames) {
+        for (let sheetIdx = 0; sheetIdx < sheetNames.length; sheetIdx++) {
+            const sheetName = sheetNames[sheetIdx];
             const sheet = workbook.Sheets[sheetName];
             const parsed = parseSheetData(sheet);
             if (parsed.length === 0) continue;
@@ -312,7 +319,7 @@ document.getElementById('uploadBenchmarkBtn').addEventListener('click', async ()
                 const custom = nameInput && nameInput.value.trim();
                 if (custom) benchmarkName = custom;
             }
-            await db.benchmarks.add({ name: benchmarkName, data: parsed });
+            await db.benchmarks.add({ name: benchmarkName, data: parsed, order: maxOrder + 1 + sheetIdx });
             importCount++;
         }
         if (importCount === 0) alert('未解析到有效数据，请检查日期列格式（支持 Excel 日期、数字序列号、yyyy-mm-dd、yyyy/m/d、yyyy年m月d日、yyyymmdd）');
