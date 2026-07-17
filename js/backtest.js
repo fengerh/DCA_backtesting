@@ -95,12 +95,13 @@ function computeMetrics(validDates, validAssets, validInvest) {
 }
 
 // ============ 基金数据持久化（IndexedDB，与基准一致） ============
-function serializeFundRow(code, f) {
+function serializeFundRow(code, f, order) {
     return {
         code: code,
         dates: f.dates.map(d => formatDate(d)),
         nav: f.nav, div: f.div,
-        minDate: f.minDate, maxDate: f.maxDate
+        minDate: f.minDate, maxDate: f.maxDate,
+        order: order
     };
 }
 function rowToFund(row) {
@@ -111,12 +112,15 @@ function rowToFund(row) {
     };
 }
 async function saveFundsToDB() {
-    const rows = Object.keys(fundsData).map(code => serializeFundRow(code, fundsData[code]));
+    const codes = Object.keys(fundsData);
+    const rows = codes.map((code, idx) => serializeFundRow(code, fundsData[code], idx));
     await db.funds.clear();
     await db.funds.bulkPut(rows);
 }
 async function loadFundsFromDB() {
     const rows = await db.funds.toArray();
+    // 按导入时记录的 order 排序还原 Excel 工作表顺序；旧缓存无 order 时回退到末尾（保持原代码序）
+    rows.sort((a, b) => (a.order == null ? Infinity : a.order) - (b.order == null ? Infinity : b.order));
     fundsData = {};
     rows.forEach(r => { fundsData[r.code] = rowToFund(r); });
     return Object.keys(fundsData).length > 0;
@@ -146,16 +150,11 @@ async function clearAllFunds() {
     clearAllPlanData();
     refreshFundUI();
 }
-// UI 同步：基金下拉 / 列表 / 卡片显隐 / 本地计数
+// UI 同步：基金列表 / 计划卡片显隐 / 本地计数
 function refreshFundUI() {
     renderFundList();
-    const fundSelect = document.getElementById('fundSelect');
-    fundSelect.innerHTML = '';
-    Object.keys(fundsData).forEach(code => {
-        const o = document.createElement('option'); o.value = code; o.textContent = code; fundSelect.appendChild(o);
-    });
     const has = Object.keys(fundsData).length > 0;
-    ['planSection','planListSection','resultSection'].forEach(id => {
+    ['planListSection','resultSection'].forEach(id => {
         const el = document.getElementById(id); if (el) el.style.display = has ? 'block' : 'none';
     });
     const hint = document.getElementById('fundStorageHint');
@@ -180,16 +179,6 @@ function renderFundList() {
         if (confirm('删除基金 ' + btn.dataset.code + '？所有相关计划将一并清空。')) deleteFund(btn.dataset.code);
     }));
 }
-function applyFirstFundDefaults() {
-    const codes = Object.keys(fundsData);
-    if (!codes.length) return;
-    const f = fundsData[codes[0]];
-    const sd = document.getElementById('startDate'), ed = document.getElementById('endDate');
-    sd.value = f.minDate; sd.min = f.minDate; sd.max = f.maxDate;
-    ed.value = f.maxDate; ed.min = f.minDate; ed.max = f.maxDate;
-    document.getElementById('invType').dispatchEvent(new Event('change'));
-}
-
 // 基金上传（方案B：合并，同名覆盖/新名追加；写入 IndexedDB 并清空所有计划）
 document.getElementById('fileInput').addEventListener('change', function(e) {
     const file = e.target.files[0];
@@ -198,7 +187,6 @@ document.getElementById('fileInput').addEventListener('change', function(e) {
     reader.onload = async function(e) {
         const data = new Uint8Array(e.target.result);
         const workbook = XLSX.read(data, {type: 'array', cellDates: true});
-        let infoHtml = '<div class="font-medium text-green-600 mb-2">✅ 已加载基金：</div><ul class="list-disc list-inside space-y-1">';
         let added = 0;
         workbook.SheetNames.forEach(name => {
             const sheet = workbook.Sheets[name];
@@ -218,17 +206,13 @@ document.getElementById('fileInput').addEventListener('change', function(e) {
                 const minDate = formatDate(dates[0]);
                 const maxDate = formatDate(dates[dates.length-1]);
                 fundsData[name] = {dates, nav, div, minDate, maxDate};
-                infoHtml += `<li><strong>${name}</strong>：${minDate} ~ ${maxDate}</li>`;
                 added++;
             }
         });
-        infoHtml += '</ul>';
-        document.getElementById('fundInfo').innerHTML = infoHtml;
         if (added > 0) {
             await saveFundsToDB();
             clearAllPlanData();
             refreshFundUI();
-            applyFirstFundDefaults();
         }
     };
     reader.readAsArrayBuffer(file);
@@ -250,78 +234,25 @@ document.getElementById('fundClearAllBtn').addEventListener('click', async () =>
     await clearAllFunds();
 });
 
-document.getElementById('fundSelect').addEventListener('change', function() {
-    const fund = fundsData[this.value];
-    document.getElementById('startDate').value = fund.minDate;
-    document.getElementById('startDate').min = fund.minDate;
-    document.getElementById('startDate').max = fund.maxDate;
-    document.getElementById('endDate').value = fund.maxDate;
-    document.getElementById('endDate').min = fund.minDate;
-    document.getElementById('endDate').max = fund.maxDate;
-});
-document.getElementById('invType').addEventListener('change', function() {
-    const v = this.value;
-    const isSingle = v === 'single';
-    const isWeekly = v === 'weekly' || v === 'biweekly';
-    const isBiweekly = v === 'biweekly';
-    const isMonthly = v === 'monthly';
-
-    // 结束日期：单笔时不隐藏，只置灰
-    const endDateDiv = document.getElementById('endDateDiv');
-    const endDate = document.getElementById('endDate');
-    const startDate = document.getElementById('startDate');
-    if (isSingle) {
-        if (!endDate.dataset.lastValue) endDate.dataset.lastValue = endDate.value;
-        endDate.value = startDate.value;
-    } else {
-        endDate.value = endDate.dataset.lastValue || endDate.max;
-        delete endDate.dataset.lastValue;
-    }
-    endDate.disabled = isSingle;
-    endDateDiv.classList.toggle('opacity-50', isSingle);
-    endDateDiv.classList.toggle('cursor-not-allowed', isSingle);
-
-    // 右侧定投周期：始终占住右半边，按模式切换显隐/激活
-    const rightLabel = document.getElementById('rightLabel');
-    const scheduleDisabled = document.getElementById('scheduleDisabled');
-    const weekdaySel = document.getElementById('weekday');
-    const dayOfMonthSel = document.getElementById('dayOfMonth');
-
-    scheduleDisabled.classList.add('hidden');
-    weekdaySel.classList.add('hidden');
-    dayOfMonthSel.classList.add('hidden');
-
-    if (isSingle) {
-        rightLabel.textContent = '定投周期';
-        scheduleDisabled.classList.remove('hidden');
-    } else if (isWeekly) {
-        rightLabel.textContent = isBiweekly ? '定投星期(每双周)' : '定投星期';
-        weekdaySel.classList.remove('hidden');
-    } else if (isMonthly) {
-        rightLabel.textContent = '定投日(每月)';
-        dayOfMonthSel.classList.remove('hidden');
-    }
-});
-document.getElementById('stopGainEnabled').addEventListener('change', function() {
-    const show = this.checked;
-    document.getElementById('stopGainPctDiv').classList.toggle('hidden', !show);
-    document.getElementById('stopGainSellRatioDiv').classList.toggle('hidden', !show);
-});
-
 function addPlan() {
-    const fund = document.getElementById('fundSelect').value;
-    const type = document.getElementById('invType').value;
-    const startDate = document.getElementById('startDate').value;
-    const endDate = document.getElementById('endDate').value;
-    const amount = parseFloat(document.getElementById('amount').value);
-    const div = document.getElementById('divMethod').value;
-    const weekday = (type === 'weekly' || type === 'biweekly') ? parseInt(document.getElementById('weekday').value, 10) : null;
-    const dayOfMonth = type === 'monthly' ? document.getElementById('dayOfMonth').value : null;
-    const stopGainEnabled = document.getElementById('stopGainEnabled').checked;
-    const stopGainPct = stopGainEnabled ? parseFloat(document.getElementById('stopGainPct').value) : 0;
-    const stopGainSellRatio = stopGainEnabled ? parseFloat(document.getElementById('stopGainSellRatio').value) : 0;
-    if (!fund || !startDate || amount <= 0) { alert('请填写完整信息！'); return; }
-    const plan = { id: Date.now(), fund, type, startDate, endDate: type === 'single' ? startDate : endDate, amount, div, weekday, dayOfMonth, stopGain: stopGainEnabled, stopGainPct, stopGainSellRatio };
+    const funds = Object.keys(fundsData);
+    if (funds.length === 0) { alert('请先在「数据管理」中上传基金净值数据'); return; }
+    const fund = funds[0];
+    const f = fundsData[fund];
+    const plan = {
+        id: Date.now() + Math.floor(Math.random() * 1000),
+        fund,
+        type: 'monthly',
+        startDate: f.minDate,
+        endDate: f.maxDate,
+        amount: 1000,
+        div: 'reinvest',
+        weekday: 1,
+        dayOfMonth: 'first',
+        stopGain: false,
+        stopGainPct: 8,
+        stopGainSellRatio: 100
+    };
     const existingIndex = investmentPlans.findIndex(p => p.fund === fund);
     if (existingIndex !== -1) {
         if (!confirm(`基金 ${fund} 已有计划，是否覆盖？`)) return;
@@ -395,39 +326,100 @@ function fundCodeName(key) {
     return { code: String(key), name: String(key) };
 }
 
+// 单张计划卡片（内联可编辑，data-field 写回 investmentPlans 对应对象）
+function planCardHtml(p) {
+    const fundOpts = Object.keys(fundsData).map(k => `<option value="${k}" ${k === p.fund ? 'selected' : ''}>${k}</option>`).join('');
+    const typeOpts = `
+        <option value="single" ${p.type === 'single' ? 'selected' : ''}>单笔</option>
+        <option value="weekly" ${p.type === 'weekly' ? 'selected' : ''}>每周定投</option>
+        <option value="biweekly" ${p.type === 'biweekly' ? 'selected' : ''}>每双周定投</option>
+        <option value="monthly" ${p.type === 'monthly' ? 'selected' : ''}>每月定投</option>`;
+    const wdOpts = [1,2,3,4,5].map(d => `<option value="${d}" ${String(p.weekday) === String(d) ? 'selected' : ''}>${wdNames[d]}</option>`).join('');
+    const domOpts = ['first','1','2','3','4','5','6','7','8','9','10','11','12','13','14','15','16','17','18','19','20','21','22','23','24','25','26','27','28'].map(d => {
+        const t = d === 'first' ? '每月首个交易日' : (d + ' 号');
+        return `<option value="${d}" ${String(p.dayOfMonth) === String(d) ? 'selected' : ''}>${t}</option>`;
+    }).join('');
+    const divOpts = `<option value="reinvest" ${p.div === 'reinvest' ? 'selected' : ''}>红利再投资</option><option value="cash" ${p.div === 'cash' ? 'selected' : ''}>现金分红</option>`;
+    const fd = fundsData[p.fund] || {};
+    const isSingle = p.type === 'single';
+    const showWeekday = p.type === 'weekly' || p.type === 'biweekly';
+    const showDom = p.type === 'monthly';
+    const disCls = 'disabled:bg-gray-100 disabled:text-gray-400 disabled:cursor-not-allowed';
+    const daySlot = showWeekday
+        ? `<label class="block text-xs text-gray-600 mb-1">定投星期</label>
+           <select data-field="weekday" class="w-full p-2 border rounded-lg text-sm ${disCls}">${wdOpts}</select>`
+        : showDom
+        ? `<label class="block text-xs text-gray-600 mb-1">每月几号</label>
+           <select data-field="dayOfMonth" class="w-full p-2 border rounded-lg text-sm ${disCls}">${domOpts}</select>`
+        : `<label class="block text-xs text-gray-600 mb-1">定投周期</label>
+           <select disabled class="w-full p-2 border rounded-lg bg-gray-100 text-gray-400 cursor-not-allowed text-sm"><option>—</option></select>`;
+    const stopGainPctDiv = p.stopGain ? `<div class="md:col-span-1"><label class="block text-xs text-gray-600 mb-1">止盈阈值(%)</label><input type="number" data-field="stopGainPct" value="${p.stopGainPct}" min="0.1" step="0.1" class="w-full p-2 border rounded-lg text-sm"></div>` : '';
+    const stopGainSellDiv = p.stopGain ? `<div class="md:col-span-1"><label class="block text-xs text-gray-600 mb-1">赎回比例(%)</label><input type="number" data-field="stopGainSellRatio" value="${p.stopGainSellRatio}" min="1" max="100" step="1" class="w-full p-2 border rounded-lg text-sm"></div>` : '';
+    return `
+    <div class="border rounded-lg p-3 bg-gray-50" data-id="${p.id}">
+      <div class="grid grid-cols-1 md:grid-cols-6 gap-3 items-start">
+        <div class="md:col-span-2"><label class="block text-xs text-gray-600 mb-1">基金</label><select data-field="fund" class="w-full p-2 border rounded-lg text-sm">${fundOpts}</select></div>
+        <div class="md:col-span-1"><label class="block text-xs text-gray-600 mb-1">投资类型</label><select data-field="type" class="w-full p-2 border rounded-lg text-sm">${typeOpts}</select></div>
+        <div class="md:col-span-2">${daySlot}</div>
+        <div class="md:col-span-1"><label class="block text-xs text-gray-600 mb-1">金额(元)</label><input type="number" data-field="amount" value="${p.amount}" min="100" class="w-full p-2 border rounded-lg text-sm"></div>
+      </div>
+      <div class="grid grid-cols-1 md:grid-cols-6 gap-3 items-start mt-3">
+        <div class="md:col-span-1"><label class="block text-xs text-gray-600 mb-1">开始日期</label><input type="date" data-field="startDate" value="${p.startDate}" min="${fd.minDate || ''}" max="${fd.maxDate || ''}" class="w-full p-2 border rounded-lg text-sm"></div>
+        <div class="md:col-span-1 ${isSingle ? 'opacity-50 cursor-not-allowed' : ''}"><label class="block text-xs text-gray-600 mb-1">结束日期</label><input type="date" data-field="endDate" value="${isSingle ? p.startDate : p.endDate}" ${isSingle ? 'disabled' : ''} min="${fd.minDate || ''}" max="${fd.maxDate || ''}" class="w-full p-2 border rounded-lg text-sm ${disCls}"></div>
+        <div class="md:col-span-1"><label class="block text-xs text-gray-600 mb-1">分红方式</label><select data-field="div" class="w-full p-2 border rounded-lg text-sm">${divOpts}</select></div>
+        <div class="md:col-span-1 flex items-end"><label class="flex items-center gap-2 text-xs font-medium text-gray-700 cursor-pointer h-9"><input type="checkbox" data-field="stopGain" ${p.stopGain ? 'checked' : ''} class="w-4 h-4"> 目标止盈</label></div>
+        ${stopGainPctDiv}
+        ${stopGainSellDiv}
+      </div>
+      <div class="mt-2 text-right"><button data-act="del" class="text-red-500 hover:text-red-700 text-sm font-medium">删除此计划</button></div>
+    </div>`;
+}
+
 function renderPlanList() {
     const container = document.getElementById('planList');
-    if (investmentPlans.length === 0) { container.innerHTML = '<p class="text-gray-500 text-sm">暂无计划</p>'; return; }
-    container.innerHTML = investmentPlans.map((p, i) => {
-        const typeText = p.type === 'single' ? '单笔' : p.type === 'weekly' ? '每周定投' : p.type === 'biweekly' ? '每双周定投' : '每月定投';
-        let freqText = '';
-        if (p.type === 'weekly') freqText = wdNames[p.weekday != null ? p.weekday : 1];
-        else if (p.type === 'biweekly') freqText = '每双周' + wdNames[p.weekday != null ? p.weekday : 1];
-        else if (p.type === 'monthly') freqText = p.dayOfMonth === 'first' ? '每月首个交易日' : (p.dayOfMonth || '1') + '号';
-        const divText = p.div === 'reinvest' ? '红利再投资' : '现金分红';
-        const cn = fundCodeName(p.fund);
-        const dateText = p.type === 'single' ? p.startDate : `${p.startDate}~${p.endDate}`;
-        let durText = '—';
-        if (p.type !== 'single') {
-            const sd = new Date(p.startDate + 'T00:00:00');
-            const ed = new Date(p.endDate + 'T00:00:00');
-            if (!isNaN(sd) && !isNaN(ed) && ed >= sd) durText = (Math.round((ed - sd) / 86400000) / 365).toFixed(2) + ' 年';
-        }
-        const freqPart = p.type === 'single' ? '' : ` | 定投日:${freqText}`;
-        const stopGainPart = p.stopGain ? ` | 止盈${p.stopGainPct}%/${p.stopGainSellRatio}%` : '';
-        return `<div class="flex justify-between items-center p-3 bg-gray-50 rounded-lg">
-            <div class="text-sm"><span class="font-medium">${i+1}.</span> <span class="font-mono text-gray-500">${cn.code}</span> <strong>${cn.name || cn.code}</strong> | ${typeText}${freqPart}${stopGainPart} | ${p.amount.toFixed(0)}元 | ${divText} | ${dateText} | ${durText}</div>
-            <button onclick="deletePlan(${p.id})" class="text-red-500 hover:text-red-700 text-sm font-medium">删除</button>
-        </div>`;
-    }).join('');
+    if (!container) return;
+    if (investmentPlans.length === 0) { container.innerHTML = '<p class="text-gray-500 text-sm">暂无计划，点击右上角「＋ 添加计划」。</p>'; return; }
+    container.innerHTML = investmentPlans.map(p => planCardHtml(p)).join('');
+    investmentPlans.forEach(p => {
+        const card = container.querySelector('[data-id="' + p.id + '"]');
+        if (!card) return;
+        card.querySelectorAll('[data-field]').forEach(el => {
+            el.addEventListener('change', e => {
+                const f = e.target.dataset.field;
+                let v = e.target.value;
+                if (e.target.type === 'number') v = parseFloat(v);
+                if (e.target.type === 'checkbox') v = e.target.checked;
+                if (f === 'weekday') v = parseInt(e.target.value, 10);
+                p[f] = v;
+                if (f === 'fund') {
+                    const nf = fundsData[v];
+                    if (nf) { p.startDate = nf.minDate; p.endDate = nf.maxDate; }
+                    renderPlanList();
+                } else if (f === 'type') {
+                    if (v === 'single') p.endDate = p.startDate;
+                    else { const nf = fundsData[p.fund]; if (nf && p.endDate === p.startDate) p.endDate = nf.maxDate; }
+                    renderPlanList();
+                } else if (f === 'startDate' && p.type === 'single') {
+                    p.endDate = v;
+                    renderPlanList();
+                } else if (f === 'stopGain') {
+                    renderPlanList();
+                }
+                checkNavGaps();
+            });
+        });
+        const del = card.querySelector('[data-act="del"]');
+        if (del) del.addEventListener('click', () => deletePlan(p.id));
+    });
 }
 
 // 核心回测（保持不变）
 function runBacktest() {
     if (investmentPlans.length === 0) { alert('请先添加投资计划！'); return; }
     const fundShares = {}; Object.keys(fundsData).forEach(code => fundShares[code] = 0);
-    let totalCash = 0;
-    const dailyAsset = [], dailyDates = [], dailyInvest = [], dailyCashDiv = [];
+    let totalCash = 0;       // 总现金（真实分红 + 止盈赎回到账）
+    let totalCashDiv = 0;    // 纯现金分红累计（不含止盈赎回）
+    const dailyAsset = [], dailyDates = [], dailyInvest = [], dailyCashDiv = [], dailyTotalCash = [];
     const cashFlows = [], flowDates = [];
 
     const allDatesSet = new Set();
@@ -444,7 +436,7 @@ function runBacktest() {
     const simDiv = {};        // 与 allDateStrs 对齐的每份额分红数组（无分红为 0）
     const simDow = new Array(allDateStrs.length);   // 每日期的星期（0=周日），避免热循环中重复构造 Date
     for (let k = 0; k < allDateStrs.length; k++) simDow[k] = new Date(allDateStrs[k] + 'T00:00:00').getUTCDay();
-    // 预缓存时间戳与“日”数值，供定投模拟热循环直接使用（消除内层 new Date 与字符串 split）
+    // 预缓存时间戳与"日"数值，供定投模拟热循环直接使用（消除内层 new Date 与字符串 split）
     const simDateTs = new Array(allDateStrs.length);
     const simDayOfMonth = new Array(allDateStrs.length);
     for (let k = 0; k < allDateStrs.length; k++) { simDateTs[k] = allDates[k].getTime(); simDayOfMonth[k] = parseInt(allDateStrs[k].split('-')[2], 10); }
@@ -531,7 +523,7 @@ function runBacktest() {
             if (fundShares[fund] > 0 && divPerShare > 0) {
                 const totalDiv = fundShares[fund] * divPerShare;
                 if (plan.div === 'reinvest') fundShares[fund] += totalDiv / nav;
-                else { totalCash += totalDiv; cashFlows.push(totalDiv); flowDates.push(new Date(currentDt)); }
+                else { totalCash += totalDiv; totalCashDiv += totalDiv; cashFlows.push(totalDiv); flowDates.push(new Date(currentDt)); }
             }
         }
         // 目标止盈检查（按单基金，在投资前、以截至昨日的本轮峰值本金为分母）
@@ -621,7 +613,8 @@ function runBacktest() {
         dailyAsset.push(mv + totalCash);
         dailyDates.push(new Date(currentDt));
         dailyInvest.push(dailyInv);
-        dailyCashDiv.push(totalCash);
+        dailyCashDiv.push(totalCashDiv);
+        dailyTotalCash.push(totalCash);
     }
 
     let marketValue = 0;
@@ -629,8 +622,8 @@ function runBacktest() {
         const fundData = fundsData[code];
         marketValue += fundShares[code] * fundData.nav[fundData.nav.length-1];
     }
-    const cashDiv = totalCash;
-    const totalAsset = marketValue + cashDiv;
+    const cashDiv = totalCashDiv;
+    const totalAsset = marketValue + totalCash;
     cashFlows.push(marketValue);
     flowDates.push(dailyDates[dailyDates.length-1]);
     const totalInvest = -cashFlows.reduce((s, v) => s + (v < 0 ? v : 0), 0);
@@ -660,11 +653,12 @@ function runBacktest() {
     const validAssets = dailyAsset.slice(startIdx);
     const validInvest = dailyInvest.slice(startIdx);
     const validCashDivs = dailyCashDiv.slice(startIdx);
+    const validTotalCash = dailyTotalCash.slice(startIdx);
 
     const _m = computeMetrics(validDates, validAssets, validInvest);
     let annualVolatility = _m.annualVolatility, sharpeRatio = _m.sharpeRatio, calmarRatio = _m.calmarRatio, maxDrawdown = _m.maxDrawdown;
     let annualReturnPct = _m.annualReturnPct, winRate = _m.winRate, maxDDDuration = _m.maxDDDuration, netValues = _m.netValues;
-    backtestResult = { dates: validDates, assets: validAssets, netValues, invests: validInvest, cashDivs: validCashDivs,
+    backtestResult = { dates: validDates, assets: validAssets, netValues, invests: validInvest, cashDivs: validCashDivs, totalCashSeries: validTotalCash,
         simDateStrs: allDateStrs, simNav: simNav, simDiv: simDiv, simDow: simDow, simDateTs: simDateTs, simDayOfMonth: simDayOfMonth, simStartIdx: startIdx,
         stopGainByFund, stopGainEvents, totalMaxPrincipal, totalRedeemedAll, maxPrincipalReturn, hasStopGainPlan };
 
@@ -690,23 +684,26 @@ function runBacktest() {
         <div class="bg-emerald-50 p-4 rounded-lg text-center" data-mkey="XIRR年化"><div class="text-sm text-slate-500">XIRR年化</div><div class="text-2xl font-bold text-emerald-800">${isNaN(xirrVal)?'-':xirrVal.toFixed(2)+'%'}</div></div>
         <div class="bg-emerald-50 p-4 rounded-lg text-center" data-mkey="年化收益率(时间加权)"><div class="text-sm text-slate-500">年化收益率(时间加权)</div><div class="text-2xl font-bold text-emerald-800">${twrHtml}</div></div>
         <div class="bg-emerald-50 p-4 rounded-lg text-center" data-mkey="胜率(正收益日占比)"><div class="text-sm text-slate-500">胜率(正收益日占比)</div><div class="text-2xl font-bold text-emerald-800">${winHtml}</div></div>
-        <div class="bg-amber-50 p-4 rounded-lg text-center" data-mkey="赎回金额"><div class="text-sm text-slate-500">赎回金额</div><div class="text-2xl font-bold text-amber-700">${totalRedeemedAll.toFixed(2)} 元</div></div>
+        <div class="bg-amber-50 p-4 rounded-lg text-center cursor-help" data-mkey="赎回金额"><div class="text-sm text-slate-500">赎回金额</div><div class="text-2xl font-bold text-amber-700">${totalRedeemedAll.toFixed(2)} 元</div></div>
 
         ${riskHtml}
         <div class="bg-amber-50 p-4 rounded-lg text-center cursor-help" data-mkey="峰值本金收益率"><div class="text-sm text-slate-500">峰值本金收益率</div><div class="text-2xl font-bold text-amber-700">${peakReturnVal.toFixed(2)}%</div></div>
     `;
-    // 止盈浮窗：hover 峰值本金收益率卡（或浮窗本身）时显示各基金止盈明细
+    // 止盈浮窗：赎回金额卡显示「止盈明细」；峰值本金收益率卡显示「止盈次数 + 间隔统计」
     const tipEl = document.getElementById('stopGainTip');
-    const peakReturnCard = document.querySelector('#metrics [data-mkey="峰值本金收益率"]');
-    if (peakReturnCard) {
+    const bindStopGainTip = (mkey, builder) => {
+        const card = document.querySelector('#metrics [data-mkey="' + mkey + '"]');
+        if (!card) return;
         let tipTimer = null;
-        const showTip = () => { clearTimeout(tipTimer); tipEl.innerHTML = buildStopGainTip(); tipEl.classList.remove('hidden'); };
+        const showTip = () => { clearTimeout(tipTimer); tipEl.innerHTML = builder(); tipEl.classList.remove('hidden'); };
         const hideTip = () => { tipTimer = setTimeout(() => tipEl.classList.add('hidden'), 150); };
-        peakReturnCard.addEventListener('mouseenter', showTip);
-        peakReturnCard.addEventListener('mouseleave', hideTip);
+        card.addEventListener('mouseenter', showTip);
+        card.addEventListener('mouseleave', hideTip);
         tipEl.addEventListener('mouseenter', () => clearTimeout(tipTimer));
         tipEl.addEventListener('mouseleave', hideTip);
-    }
+    };
+    bindStopGainTip('赎回金额', buildStopGainTip);
+    bindStopGainTip('峰值本金收益率', buildStopGainSummaryTip);
 
     if (validDates.length > 0) {
         document.getElementById('chartFilter').style.display = 'block';
@@ -743,6 +740,43 @@ function buildStopGainTip() {
         });
         html += '</div>';
     }
+    return html;
+}
+
+// 构建峰值本金收益率浮窗：止盈次数 + 间隔统计（按单基金）
+function buildStopGainSummaryTip() {
+    if (!backtestResult.hasStopGainPlan) return '<div class="text-amber-700 font-medium">无基金启用目标止盈</div>';
+    const byFund = backtestResult.stopGainByFund || {};
+    const codes = Object.keys(byFund);
+    if (codes.length === 0) return '<div class="text-amber-700 font-medium">已启用目标止盈，但回测区间内未触发。</div>';
+    let totalCount = 0;
+    let html = '<div class="font-semibold text-amber-800 mb-2">止盈次数与间隔统计（按单基金）</div>';
+    for (const code of codes) {
+        const cn = fundCodeName(code);
+        const info = byFund[code];
+        const evs = info.events || [];
+        const n = evs.length;
+        totalCount += n;
+        html += '<div class="mb-3 pb-2 border-b border-amber-100 last:border-0">';
+        html += '<div class="font-medium text-gray-800">' + cn.code + ' ' + (cn.name || '') + '</div>';
+        html += '<div class="text-xs text-gray-500">止盈次数：' + n + ' 次</div>';
+        if (n >= 2) {
+            const intervals = [];
+            for (let i = 1; i < n; i++) {
+                const t0 = new Date(evs[i - 1].dateStr + 'T00:00:00').getTime();
+                const t1 = new Date(evs[i].dateStr + 'T00:00:00').getTime();
+                intervals.push(Math.round((t1 - t0) / 86400000));
+            }
+            const min = Math.min.apply(null, intervals);
+            const max = Math.max.apply(null, intervals);
+            const avg = Math.round(intervals.reduce((a, b) => a + b, 0) / intervals.length);
+            html += '<div class="text-xs text-gray-500">间隔统计：最短 ' + min + ' 天 · 最长 ' + max + ' 天 · 平均 ' + avg + ' 天</div>';
+        } else if (n === 1) {
+            html += '<div class="text-xs text-gray-500">间隔统计：仅触发 1 次，无间隔</div>';
+        }
+        html += '</div>';
+    }
+    html += '<div class="text-xs text-amber-700 font-medium">合计止盈次数：' + totalCount + ' 次</div>';
     return html;
 }
 

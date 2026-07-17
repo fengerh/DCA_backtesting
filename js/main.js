@@ -17,6 +17,6 @@ setMode('combo');
 (async function initFunds() {
     try {
         const ok = await loadFundsFromDB();
-        if (ok) { refreshFundUI(); applyFirstFundDefaults(); }
+        if (ok) { refreshFundUI(); }
     } catch (e) { console.error('加载本地基金失败', e); }
 })();

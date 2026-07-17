@@ -10,6 +10,7 @@ let scResults = [];
 let scChart = null;
 let scChartXMode = 'month';   // 'month' | 'date'
 let scChartYMode = 'net';     // 'net' | 'xirr'
+let currentMode = 'combo';    // 'combo' | 'sc' —— 供导出报告按当前模式分流
 let scCommonStart = null;
 const SC_COLORS = ['#2563eb','#dc2626','#16a34a','#d97706','#7c3aed','#0891b2','#db2777','#65a30d'];
 const SC_STRATEGIES = {
@@ -35,7 +36,7 @@ function setMode(mode) {
         combo.style.display = 'none';
         sc.style.display = 'block';
         // 显式隐藏 combo 内的子卡片（防止父容器隐藏后子元素 display:block 干扰）
-        const comboCards = ['planSection','planListSection','resultSection','profitProbabilitySection','correlationSection','chartFilter','benchmarkSelectorWrapper','periodMetricsSection'];
+        const comboCards = ['planListSection','resultSection','profitProbabilitySection','correlationSection','chartFilter','benchmarkSelectorWrapper','periodMetricsSection'];
         comboCards.forEach(id => { const el = document.getElementById(id); if (el) el.style.display = 'none'; });
         if (scItems.length === 0 && hasFundData) addScItem();
     } else {
@@ -47,7 +48,6 @@ function setMode(mode) {
         if (scResult) scResult.classList.add('hidden');
         // 如果有基金数据，恢复回测卡片可见性
         if (hasFundData) {
-            document.getElementById('planSection').style.display = 'block';
             document.getElementById('planListSection').style.display = 'block';
             document.getElementById('resultSection').style.display = 'block';
         }
@@ -56,6 +56,7 @@ function setMode(mode) {
     const idleClass = 'px-5 py-2 rounded-lg font-medium transition bg-gray-200 text-gray-700 hover:bg-gray-300';
     bCombo.className = mode === 'combo' ? activeClass : idleClass;
     bSc.className = mode === 'sc' ? activeClass : idleClass;
+    currentMode = mode;
 }
 
 function addScItem() {

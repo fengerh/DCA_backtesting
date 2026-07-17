@@ -3,7 +3,7 @@
 <head>
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
-    <title>基金组合回测工具 v20260716.1550</title>
+    <title>基金组合回测工具 v20260717.1500</title>
     <!-- 依赖库 -->
     <script src="js/xlsx.full.min.js"></script>
     <script src="https://cdn.jsdelivr.net/npm/chart.js@4.4.1/dist/chart.umd.min.js"></script>
@@ -20,10 +20,10 @@
                 <div class="flex flex-wrap items-center gap-3 p-3 bg-blue-50 rounded-lg border border-blue-200">
                     <span class="text-xs text-gray-500">导出项目含全部基准，可一键还原并自动回测</span>
                     <span class="text-sm font-medium text-blue-700">项目与报告：</span>
-                    <button id="importProjectBtn" class="bg-indigo-600 text-white px-4 py-2 rounded-lg hover:bg-indigo-700 transition text-sm font-medium">⬇️导入项目</button>
-                    <button id="exportProjectBtn" class="bg-blue-600 text-white px-4 py-2 rounded-lg hover:bg-blue-700 transition text-sm font-medium">⬆️导出项目</button>
+                    <button id="importProjectBtn" style="filter: saturate(0.5);" class="bg-indigo-600 text-white px-4 py-2 rounded-lg hover:bg-indigo-700 transition text-sm font-medium">⬇️导入项目</button>
+                    <button id="exportProjectBtn" style="filter: saturate(0.5);" class="bg-blue-600 text-white px-4 py-2 rounded-lg hover:bg-blue-700 transition text-sm font-medium">⬆️导出项目</button>
                     <input type="file" id="importProjectFile" accept=".json" class="hidden">
-                    <button id="reportHtmlBtn" class="bg-emerald-600 text-white px-4 py-2 rounded-lg hover:bg-emerald-700 transition text-sm font-medium">📄导出报告(HTML)</button>
+                    <button id="reportHtmlBtn" style="filter: saturate(0.5);" class="bg-emerald-600 text-white px-4 py-2 rounded-lg hover:bg-emerald-700 transition text-sm font-medium">📄导出报告(HTML)</button>
                     
                 </div>
             <div class="flex flex-wrap items-center gap-4">
@@ -104,118 +104,12 @@
 
         <div id="comboBacktestRoot">
         <!-- 2. 添加计划 -->
-        <div class="bg-white p-6 rounded-xl shadow-md mb-6" id="planSection" style="display:none;">
-            <div class="flex items-center justify-between mb-4">
-                <h2 class="text-xl font-semibold text-gray-700">2. 添加投资计划</h2>
-                <button onclick="addPlan()" class="bg-blue-600 text-white px-6 py-2 rounded-lg hover:bg-blue-700 transition font-medium">添加计划</button>
-            </div>
-            <div class="grid grid-cols-1 md:grid-cols-3 gap-4">
-                <div>
-                    <label class="block text-sm font-medium text-gray-700 mb-1">选择基金</label>
-                    <select id="fundSelect" class="w-full p-2 border border-gray-300 rounded-lg focus:ring-2 focus:ring-blue-500"></select>
-                </div>
-                
-                    <div class="flex items-start gap-3">
-                        <div class="flex-1 min-w-0">
-                            <label class="block text-sm font-medium text-gray-700 mb-1">投资类型</label>
-                            <select id="invType" class="w-full p-2 border border-gray-300 rounded-lg focus:ring-2 focus:ring-blue-500">
-                                <option value="single">单笔</option>
-                                <option value="weekly">每周定投</option>
-                                <option value="biweekly">每双周定投</option>
-                                <option value="monthly">每月定投</option>
-                            </select>
-                        </div>
-                        <div class="flex-1 min-w-0">
-                            <label id="rightLabel" class="block text-sm font-medium text-gray-700 mb-1">定投周期</label>
-                            <select id="scheduleDisabled" disabled class="w-full p-2 border border-gray-300 rounded-lg bg-gray-100 text-gray-400 cursor-not-allowed">
-                                <option>—</option>
-                            </select>
-                            <select id="weekday" class="w-full p-2 border border-gray-300 rounded-lg focus:ring-2 focus:ring-blue-500 hidden">
-                                <option value="1">周一</option>
-                                <option value="2">周二</option>
-                                <option value="3">周三</option>
-                                <option value="4">周四</option>
-                                <option value="5">周五</option>
-                            </select>
-                            <select id="dayOfMonth" class="w-full p-2 border border-gray-300 rounded-lg focus:ring-2 focus:ring-blue-500 hidden">
-                                <option value="first">每月首个交易日</option>
-                                    <option value="1">1 号</option>
-                                    <option value="2">2 号</option>
-                                    <option value="3">3 号</option>
-                                    <option value="4">4 号</option>
-                                    <option value="5">5 号</option>
-                                    <option value="6">6 号</option>
-                                    <option value="7">7 号</option>
-                                    <option value="8">8 号</option>
-                                    <option value="9">9 号</option>
-                                    <option value="10">10 号</option>
-                                    <option value="11">11 号</option>
-                                    <option value="12">12 号</option>
-                                    <option value="13">13 号</option>
-                                    <option value="14">14 号</option>
-                                    <option value="15">15 号</option>
-                                    <option value="16">16 号</option>
-                                    <option value="17">17 号</option>
-                                    <option value="18">18 号</option>
-                                    <option value="19">19 号</option>
-                                    <option value="20">20 号</option>
-                                    <option value="21">21 号</option>
-                                    <option value="22">22 号</option>
-                                    <option value="23">23 号</option>
-                                    <option value="24">24 号</option>
-                                    <option value="25">25 号</option>
-                                    <option value="26">26 号</option>
-                                    <option value="27">27 号</option>
-                                    <option value="28">28 号</option>
-                            </select>
-                        </div>
-                    </div>
-                    <div>
-                        <label class="block text-sm font-medium text-gray-700 mb-1">投资金额</label>
-                        <input type="number" id="amount" value="1000" min="100" class="w-full p-2 border border-gray-300 rounded-lg focus:ring-2 focus:ring-blue-500">
-                    </div>
-                
-            </div>
-            <div class="grid grid-cols-1 md:grid-cols-3 gap-4">
-                <div>
-                    <label class="block text-sm font-medium text-gray-700 mb-1">开始日期</label>
-                    <input type="date" id="startDate" class="w-full p-2 border border-gray-300 rounded-lg focus:ring-2 focus:ring-blue-500">
-                </div>
-                <div id="endDateDiv">
-                    <label class="block text-sm font-medium text-gray-700 mb-1">结束日期</label>
-                    <input type="date" id="endDate" class="w-full p-2 border border-gray-300 rounded-lg focus:ring-2 focus:ring-blue-500 disabled:bg-gray-100 disabled:text-gray-400 disabled:cursor-not-allowed">
-                </div>
-                <div>
-                    <label class="block text-sm font-medium text-gray-700 mb-1">分红方式</label>
-                    <select id="divMethod" class="w-full p-2 border border-gray-300 rounded-lg focus:ring-2 focus:ring-blue-500">
-                        <option value="reinvest">红利再投资</option>
-                        <option value="cash">现金分红</option>
-                    </select>
-                </div>
-            </div>
-            <div class="grid grid-cols-1 md:grid-cols-3 gap-4 mt-4 items-end">
-                <div class="md:col-span-1">
-                    <label class="flex items-center gap-2 text-sm font-medium text-gray-700 cursor-pointer">
-                        <input type="checkbox" id="stopGainEnabled" class="w-4 h-4"> 启用目标止盈（按单基金触发）
-                    </label>
-                </div>
-                <div id="stopGainPctDiv" class="hidden">
-                    <label class="block text-sm font-medium text-gray-700 mb-1">止盈阈值(%)</label>
-                    <input type="number" id="stopGainPct" value="8" min="0.1" step="0.1" class="w-full p-2 border border-gray-300 rounded-lg focus:ring-2 focus:ring-blue-500">
-                </div>
-                <div id="stopGainSellRatioDiv" class="hidden">
-                    <label class="block text-sm font-medium text-gray-700 mb-1">赎回比例(%)</label>
-                    <input type="number" id="stopGainSellRatio" value="100" min="1" max="100" step="1" class="w-full p-2 border border-gray-300 rounded-lg focus:ring-2 focus:ring-blue-500">
-                </div>
-            </div>
-            </div>
-        </div>
-
-        <!-- 3. 计划列表 -->
+        <!-- 3. 投资计划列表（内联可编辑卡片） -->
         <div class="bg-white p-6 rounded-xl shadow-md mb-6" id="planListSection" style="display:none;">
             <div class="flex items-center justify-between mb-4">
-                <h2 class="text-xl font-semibold text-gray-700">3. 投资计划列表</h2>
+                <h2 class="text-xl font-semibold text-gray-700">投资计划列表</h2>
                 <div class="flex gap-2">
+                    <button onclick="addPlan()" class="bg-blue-600 text-white px-4 py-2 rounded-lg hover:bg-blue-700 transition text-sm font-medium">＋ 添加计划</button>
                     <button onclick="clearAllPlans()" class="bg-gray-500 text-white px-4 py-2 rounded-lg hover:bg-gray-600 transition text-sm">清空全部计划</button>
                     <button onclick="checkNavGaps()" class="bg-amber-500 text-white px-4 py-2 rounded-lg hover:bg-amber-600 transition text-sm">检测净值空档</button>
                 </div>
@@ -227,7 +121,7 @@
         <!-- 4. 回测结果 -->
         <div class="bg-white p-6 rounded-xl shadow-md mb-6" id="resultSection" style="display:none;">
             <div class="flex items-center justify-between mb-6">
-                <h2 class="text-xl font-semibold text-gray-700">4. 回测结果</h2>
+                <h2 class="text-xl font-semibold text-gray-700">回测结果</h2>
                 <button onclick="runBacktest()" class="bg-green-600 text-white px-8 py-3 rounded-lg hover:bg-green-700 transition font-semibold text-lg">🚀 启动回测</button>
             </div>
             
