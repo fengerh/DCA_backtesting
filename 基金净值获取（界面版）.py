@@ -139,130 +139,129 @@ def get_months_between(start_date, end_date):
     
     return months
 
-def update_dividend_cache(years_needed, log_callback, force_refresh=False):
+# 当年数据被视为“新鲜”的最长小时数，超过则允许重新拉取当年数据
+CURRENT_YEAR_TTL_HOURS = 24
+
+
+def _parse_last_updated(value):
+    """把 last_updated 字符串解析为 datetime，失败返回 None"""
+    if not value:
+        return None
+    try:
+        return datetime.strptime(value, "%Y-%m-%d %H:%M:%S")
+    except Exception:
+        return None
+
+
+def _merge_year_data(cache, year_str, new_year_data, log_callback):
+    """把新抓到的某年数据合并进缓存（保留本地已有记录，去重）"""
+    if new_year_data is None or new_year_data.empty:
+        return
+    if year_str in cache['data'] and not cache['data'][year_str].empty:
+        existing = cache['data'][year_str]
+        combined = pd.concat([existing, new_year_data], ignore_index=True)
+        if '基金代码' in combined.columns and '除息日期' in combined.columns:
+            combined = combined.drop_duplicates(subset=['基金代码', '除息日期'])
+        added = len(combined) - len(existing)
+        cache['data'][year_str] = combined
+        log_callback(f"  🔀 {year_str} 年合并完成：本地 {len(existing)} 条 + 新增 {max(added, 0)} 条 = {len(combined)} 条")
+    else:
+        cache['data'][year_str] = new_year_data
+        log_callback(f"  ➕ {year_str} 年写入缓存，共 {len(new_year_data)} 条")
+
+
+def update_dividend_cache(years_needed, log_callback, force_refresh=False, offline_only=False):
     """
-    以缓存为基础，只获取缺失的数据
+    以本地缓存为基础，只补齐缺失年份 + 按 TTL 刷新当年数据。
+
+    - offline_only=True：完全不联网，只用本地缓存
+    - force_refresh=True：忽略本地缓存，全量重取
+    - 默认：历史年份只要缓存里有就不再重抓；当年数据按 last_updated 判断是否过期
     """
-    # 加载缓存
+    now = datetime.now()
+    current_year = now.year
+    years_needed = [str(y) for y in years_needed]
+
+    # ---- 离线模式：只读本地 ----
+    if offline_only:
+        cache = load_dividend_cache()
+        if not cache['data']:
+            log_callback("📴 离线模式：本地无分红缓存，本次分红数据将为空。")
+            return {}
+        missing = [y for y in years_needed if y not in cache['data'] or cache['data'][y].empty]
+        log_callback(f"📴 离线模式：仅使用本地缓存（最后更新 {cache.get('last_updated') or '未知'}）。")
+        if missing:
+            log_callback(f"  ⚠ 本地缺少年份 {', '.join(missing)} 的分红数据，这些年份将按无分红处理。")
+        return cache['data']
+
+    # ---- 强制刷新 ----
     if force_refresh:
         cache = {'last_updated': None, 'data': {}}
         log_callback("🔄 强制刷新模式：将重新获取所有数据。")
-    else:
-        cache = load_dividend_cache()
-        
-        # 兼容旧版缓存格式
-        if isinstance(cache, dict) and 'last_updated' not in cache:
-            # 旧版缓存（纯按年份字典），转换为新版格式
-            cache = {
-                'last_updated': None,  # 旧缓存不知道最后更新时间
-                'data': cache
-            }
-            log_callback("🔄 检测到旧版缓存格式，已自动转换。")
-    
-    # 获取当前时间
-    now = datetime.now()
-    
-    # 如果缓存为空，全量获取所需年份的数据
-    if not cache['data']:
-        log_callback("📂 缓存为空，开始全量获取所需年份数据...")
         cache = fetch_full_years_data(years_needed, log_callback, cache)
         cache['last_updated'] = now.strftime("%Y-%m-%d %H:%M:%S")
         save_dividend_cache(cache)
         return cache['data']
-    
-    # 分析缓存中已有的数据
-    log_callback("📊 分析缓存数据...")
-    
-    # 找出缓存中最晚的日期
-    latest_date_in_cache = None
-    for year, year_data in cache['data'].items():
-        if not year_data.empty and '除息日期' in year_data.columns:
-            year_data['date_dt'] = pd.to_datetime(year_data['除息日期'], errors='coerce')
-            max_date = year_data['date_dt'].max()
-            if pd.notna(max_date) and (latest_date_in_cache is None or max_date > latest_date_in_cache):
-                latest_date_in_cache = max_date
-    
-    if latest_date_in_cache is None:
-        log_callback("⚠ 缓存中没有有效日期，重新获取数据...")
-        cache = fetch_full_years_data(years_needed, log_callback, cache)
+
+    # ---- 正常模式：先读本地 ----
+    cache = load_dividend_cache()
+    if isinstance(cache, dict) and 'last_updated' not in cache:
+        cache = {'last_updated': None, 'data': cache}
+        log_callback("🔄 检测到旧版缓存格式，已自动转换。")
+
+    if cache['data']:
+        cached_years = sorted(cache['data'].keys())
+        log_callback(f"📂 已读取本地缓存：{len(cached_years)} 个年份（{', '.join(cached_years)}），最后更新 {cache.get('last_updated') or '未知'}")
     else:
-        # 计算需要补充的月份
-        log_callback(f"📅 缓存中最晚的日期: {latest_date_in_cache.strftime('%Y-%m-%d')}")
-        
-        # 如果缓存中最晚日期早于当前日期，需要更新
-        if latest_date_in_cache.date() < now.date():
-            # 计算需要获取的月份范围
-            # 从缓存最晚日期的下一个月开始
-            if latest_date_in_cache.month == 12:
-                start_year = latest_date_in_cache.year + 1
-                start_month = 1
-            else:
-                start_year = latest_date_in_cache.year
-                start_month = latest_date_in_cache.month + 1
-            
-            start_date = datetime(start_year, start_month, 1)
-            
-            # 只获取到上个月的数据（避免获取不完整的当月数据）
-            if now.month == 1:
-                end_year = now.year - 1
-                end_month = 12
-            else:
-                end_year = now.year
-                end_month = now.month - 1
-            
-            end_date = datetime(end_year, end_month, 1)
-            
-            if start_date <= end_date:
-                log_callback(f"🔄 需要补充从 {start_date.strftime('%Y-%m')} 到 {end_date.strftime('%Y-%m')} 的数据")
-                
-                # 获取缺失月份的数据
-                months_to_fetch = get_months_between(start_date, end_date)
-                
-                if months_to_fetch:
-                    log_callback(f"📥 将获取以下月份的数据: {', '.join(months_to_fetch)}")
-                    
-                    # 逐月获取数据
-                    new_data_by_year = {}
-                    for year_month in months_to_fetch:
-                        year = int(year_month.split('-')[0])
-                        
-                        try:
-                            # 获取该年数据（如果还没获取过）
-                            if str(year) not in new_data_by_year:
-                                log_callback(f"  ⏳ 获取 {year} 年分红数据...")
-                                year_data = ak.fund_fh_em(year=str(year))
-                                if not year_data.empty:
-                                    new_data_by_year[str(year)] = year_data
-                                    log_callback(f"  ✅ 获取 {year} 年数据成功，共 {len(year_data)} 条")
-                                time.sleep(0.5)
-                        except Exception as e:
-                            log_callback(f"  ❌ 获取 {year} 年数据失败: {e}")
-                    
-                    # 合并新数据到缓存
-                    for year, new_year_data in new_data_by_year.items():
-                        if year in cache['data']:
-                            # 合并并去重
-                            existing_data = cache['data'][year]
-                            combined = pd.concat([existing_data, new_year_data], ignore_index=True)
-                            
-                            # 去重（基于基金代码和除息日期）
-                            if not combined.empty and '基金代码' in combined.columns and '除息日期' in combined.columns:
-                                combined = combined.drop_duplicates(subset=['基金代码', '除息日期'])
-                            cache['data'][year] = combined
-                        else:
-                            cache['data'][year] = new_year_data
-                    
-                    # 更新最后更新时间
-                    cache['last_updated'] = now.strftime("%Y-%m-%d %H:%M:%S")
-                    save_dividend_cache(cache)
-                    log_callback(f"💾 缓存已更新，补充了 {len(months_to_fetch)} 个月的数据")
-                else:
-                    log_callback("✅ 缓存已是最新，无需更新")
-            else:
-                log_callback("✅ 缓存已是最新，无需更新")
+        log_callback("📂 本地缓存为空。")
+
+    # 1) 缺失年份：必须抓
+    years_to_fetch = [y for y in years_needed if y not in cache['data'] or cache['data'][y].empty]
+
+    # 2) 当年数据：按 TTL 判断是否需要刷新（历史年份一律不重抓）
+    cy = str(current_year)
+    if cy in years_needed and cy not in years_to_fetch:
+        last_updated = _parse_last_updated(cache.get('last_updated'))
+        if last_updated is None:
+            log_callback(f"🕒 缓存无更新时间记录，刷新 {cy} 年数据。")
+            years_to_fetch.append(cy)
         else:
-            log_callback("✅ 缓存已是最新（包含最新数据），无需更新")
-    
+            age_hours = (now - last_updated).total_seconds() / 3600
+            if age_hours >= CURRENT_YEAR_TTL_HOURS:
+                log_callback(f"🕒 缓存已过去 {age_hours:.1f} 小时（阈值 {CURRENT_YEAR_TTL_HOURS} 小时），刷新 {cy} 年数据。")
+                years_to_fetch.append(cy)
+            else:
+                log_callback(f"✅ 缓存 {age_hours:.1f} 小时内更新过，{cy} 年数据无需刷新。")
+
+    if not years_to_fetch:
+        log_callback("✅ 所需年份的分红数据均已在本地缓存中，无需联网。")
+        return cache['data']
+
+    years_to_fetch = sorted(set(years_to_fetch))
+    log_callback(f"📥 需要联网获取的年份：{', '.join(years_to_fetch)}")
+
+    fetched_any = False
+    for year_str in years_to_fetch:
+        try:
+            log_callback(f"  ⏳ 获取 {year_str} 年分红数据...")
+            year_data = ak.fund_fh_em(year=year_str)
+            if year_data is not None and not year_data.empty:
+                log_callback(f"  ✅ 获取 {year_str} 年数据成功，共 {len(year_data)} 条")
+                _merge_year_data(cache, year_str, year_data, log_callback)
+                fetched_any = True
+            else:
+                log_callback(f"  ⚠ {year_str} 年返回空数据，保留本地缓存内容。")
+            time.sleep(0.5)
+        except Exception as e:
+            log_callback(f"  ❌ 获取 {year_str} 年数据失败：{e}（保留本地缓存内容）")
+
+    if fetched_any:
+        cache['last_updated'] = now.strftime("%Y-%m-%d %H:%M:%S")
+        save_dividend_cache(cache)
+        log_callback("💾 缓存已更新并保存。")
+    else:
+        log_callback("ℹ 本次未获取到新数据，缓存保持不变。")
+
     return cache['data']
 
 def fetch_full_years_data(years_needed, log_callback, cache=None):
@@ -347,7 +346,7 @@ def get_fund_name_akshare(fund_code):
         return f"基金_{fund_code}"
     
 
-def create_excel(fund_list, start_date, end_date, output_file, log_callback, force_refresh=False):
+def create_excel(fund_list, start_date, end_date, output_file, log_callback, force_refresh=False, offline_only=False):
     placeholder = pd.DataFrame(columns=['日期', '单位净值(元)', '每份分红(元)'])
     
     # 计算所需年份范围
@@ -360,7 +359,7 @@ def create_excel(fund_list, start_date, end_date, output_file, log_callback, for
     log_callback(f"📅 所需年份范围: {start_year} 到 {end_year}")
     
     # 智能更新缓存
-    dividend_cache = update_dividend_cache(years_needed, log_callback, force_refresh)
+    dividend_cache = update_dividend_cache(years_needed, log_callback, force_refresh, offline_only)
     
     # 统计缓存数据量
     total_records = 0
@@ -450,7 +449,7 @@ class FundApp:
         tk.Label(root, text="基金代码（每行一个）", font=('微软雅黑', 10)).pack(pady=(15, 5))
         self.code_text = tk.Text(root, height=6, width=50, font=('Consolas', 10))
         self.code_text.pack()
-        self.code_text.insert('1.0', "000001") # 示例代码
+        self.code_text.insert('1.0', "000001\n007466") # 示例代码
 
         # 日期范围（使用 DateEntry 控件）
         date_frame = tk.Frame(root)
@@ -475,10 +474,20 @@ class FundApp:
         self.out_entry.pack(side=tk.LEFT, padx=5)
         self.out_entry.insert(0, f"基金数据_{datetime.now().strftime('%Y%m%d')}.xlsx")
 
-        # 强制刷新复选框
+        # 分红缓存选项
+        opt_frame = tk.Frame(root)
+        opt_frame.pack(pady=5)
+
         self.force_refresh_var = tk.BooleanVar(value=False)
-        force_cb = tk.Checkbutton(root, text="强制刷新分红缓存（忽略本地文件）", variable=self.force_refresh_var)
-        force_cb.pack(pady=5)
+        self.offline_var = tk.BooleanVar(value=False)
+
+        self.force_cb = tk.Checkbutton(opt_frame, text="强制刷新分红缓存（忽略本地文件）",
+                                       variable=self.force_refresh_var, command=self.on_force_toggle)
+        self.force_cb.pack(anchor='w')
+
+        self.offline_cb = tk.Checkbutton(opt_frame, text="仅用本地分红缓存（不联网更新分红）",
+                                         variable=self.offline_var, command=self.on_offline_toggle)
+        self.offline_cb.pack(anchor='w')
 
         # 开始按钮
         self.btn = tk.Button(root, text="🚀 开始获取", font=('微软雅黑', 11), bg="#2563eb", fg='white',
@@ -489,6 +498,16 @@ class FundApp:
         tk.Label(root, text="运行日志", font=('微软雅黑', 10)).pack()
         self.log_area = scrolledtext.ScrolledText(root, height=12, width=70, state='disabled', font=('Consolas', 9))
         self.log_area.pack(pady=5)
+
+    def on_force_toggle(self):
+        """强制刷新与离线模式互斥"""
+        if self.force_refresh_var.get():
+            self.offline_var.set(False)
+
+    def on_offline_toggle(self):
+        """离线模式与强制刷新互斥"""
+        if self.offline_var.get():
+            self.force_refresh_var.set(False)
 
     def log(self, msg):
         self.log_area.config(state='normal')
@@ -529,7 +548,8 @@ class FundApp:
 
         def task():
             force_refresh = self.force_refresh_var.get()   # 获取复选框状态
-            create_excel(codes, start, end, out, self.log, force_refresh)
+            offline_only = self.offline_var.get()
+            create_excel(codes, start, end, out, self.log, force_refresh, offline_only)
             self.root.after(0, lambda: self.btn.config(state='normal', text="🚀 开始获取"))
             self.root.after(0, lambda: messagebox.showinfo("完成", f"数据已保存至 {out}"))
 

@@ -9,12 +9,6 @@ const REPORT_VERSION = '20260708';
 const CHART_JS_CDN = 'https://cdn.jsdelivr.net/npm/chart.js@4.4.1/dist/chart.umd.min.js';
 const TAILWIND_CDN = 'https://cdn.tailwindcss.com';
 
-// 策略比较报告导出用的图表标题 / 说明文案（与 strategy.js 的 setScYMode 保持一致）
-const SC_XIRR_TITLE = '投资收益率曲线（资金加权 XIRR 年化，%）';
-const SC_NET_TITLE = '投资净值曲线（资金加权，起点=1.0）';
-const SC_XIRR_NOTE = '* 采用资金加权的 XIRR 年化收益率（与策略对比表"XIRR年化"同口径，曲线终点=该值）：每日净外部现金流 = −当日投入 + 当日落袋现金（赎回/现金分红），期末价值只计剩余持仓市值，已落袋现金此前已作正流避免重复计数。该口径不受持续定投稀释，能直接看到资金加权年化随时间的真实走势；止盈赎回作为正流计入，曲线不会因赎回而假跌。可切换"按持有期月数对齐"或"按日期"调整 x 轴。';
-const SC_NET_NOTE = '* 采用资金加权的"这一笔投资净值"（起点=1.0）：当日净值 = 当日总资产 ÷ 截至当日的累计已投入本金。该口径保留了投入节奏的影响——上涨市中单笔（一次投入）会跑在定投（分批投入）上方，能直接看出策略差异；可切换"按持有期月数对齐"（各条目从0月对齐便于跨条目对比）或"按日期"（按真实日历日期错开显示），并可在"净值 / XIRR年化"间切换 y 轴口径。';
-
 // 序列化 / 反序列化 fundsData（Date <-> yyyy-mm-dd）
 function serializeFunds(fd) {
     const out = {};
@@ -90,7 +84,7 @@ async function importProject(file) {
 
     if (Object.keys(fundsData).length) {
         const pls = document.getElementById('planListSection'); if (pls) pls.style.display = 'block';
-        const rs = document.getElementById('resultSection'); if (rs) rs.style.display = 'block';
+        // resultSection 在点击“启动回测”后才显示，导入时不提前展示
     }
     renderPlanList();
     await loadBenchmarkList();
@@ -121,12 +115,12 @@ function buildReportInner() {
         "持仓市值": "期末仍持有的份额 × 最新净值，不含已到手现金分红。",
         "累计现金分红": "累计收到的、未再投的现金分红；红利再投模式下为 0。",
         "总资产": "持仓市值 + 累计现金分红，即组合上的全部家当。",
-        "累计收益率": "资金加权口径：(总资产 ÷ 本金 − 1)。<br>正数代表整体实际赚钱。",
-        "XIRR年化": "把每笔投入/分红/市值都当作现金流，算考虑时间权重的年化内部收益率。<br>早投的钱权重更高，比累计收益率更公平。",
-        "年化收益率(时间加权)": "把组合净值序列年化（剔除你的投入节奏），反映“组合本身”的赚钱能力。",
+        "累计收益率(资金加权)": "资金加权口径：(总资产 ÷ 本金 − 1)。<br>正数代表整体实际赚钱。",
+        "XIRR年化(资金加权)": "把每笔投入/分红/市值都当作现金流，算考虑时间权重的年化内部收益率。<br>早投的钱权重更高，比累计收益率更公平。",
+        "年化收益率(时间加权净值)": "把时间加权净值序列年化（剔除你的投入节奏），反映“组合本身”的赚钱能力。",
         "胜率(正收益日占比)": "上涨交易日数 ÷ 总交易日数，越高说明日子大多在涨。",
         "最大回撤": "净值从最高点到最低点的最大跌幅(%)，越大代表最坏情况越惨。",
-        "回撤持续天数": "最长一次从顶部跌下、再回到新高所经历的天数，越久越磨人。",
+        "回撤持续天数": "最大回撤从峰值到谷值所经历的天数，越久越磨人。",
         "年化波动率": "日收益波动 × √252，衡量价格颠簸程度，越大越刺激。",
         "夏普/卡玛": "夏普=(年化收益−无风险利率)÷波动率；<br>卡玛=年化收益÷最大回撤。<br>两个都是越高越好。",
         "区间投入本金": "选定图表区间内实际投入的资金（定投+一次性买入），不含分红再投。",
@@ -262,21 +256,14 @@ function buildReportInner() {
             const mean = dailyReturns.reduce(function (a, b) { return a + b; }, 0) / dailyReturns.length;
             const variance = dailyReturns.reduce(function (a, b) { return a + Math.pow(b - mean, 2); }, 0) / dailyReturns.length;
             const annualVolatility = Math.sqrt(variance) * Math.sqrt(252);
-            let peak = nvs[0], maxDrawdown = 0;
-            for (let k = 0; k < nvs.length; k++) { const v = nvs[k]; if (v > peak) peak = v; const dd = (v - peak) / peak; if (dd < maxDrawdown) maxDrawdown = dd; }
+            let peak = nvs[0], maxDrawdown = 0, worstPeakIdx = 0, worstTroughIdx = 0, peakIdx = 0;
+            for (let k = 0; k < nvs.length; k++) { const v = nvs[k]; if (v > peak) { peak = v; peakIdx = k; } const dd = (v - peak) / peak; if (dd < maxDrawdown) { maxDrawdown = dd; worstPeakIdx = peakIdx; worstTroughIdx = k; } }
             maxDrawdown *= 100;
             let sharpeRatio = NaN, calmarRatio = NaN;
             if (annualVolatility > 0) sharpeRatio = (annualReturnTwr - RISK_FREE_RATE) / annualVolatility;
             if (maxDrawdown !== 0) calmarRatio = annualReturnTwr / Math.abs(maxDrawdown / 100);
-            let peakV = nvs[0], ddFrom = null, maxSpan = 0;
-            for (let i = 0; i < n; i++) {
-                if (nvs[i] > peakV) { peakV = nvs[i]; ddFrom = null; }
-                else if (nvs[i] < peakV) {
-                    if (ddFrom === null) ddFrom = i;
-                    const span = (wDates[i] - wDates[ddFrom]) / 86400000;
-                    if (span > maxSpan) maxSpan = span;
-                }
-            }
+            // 回撤持续天数 = 最大回撤区间（峰值→谷值）经历的自然日，与后续是否创新高无关
+            let maxSpan = (wDates[worstTroughIdx] - wDates[worstPeakIdx]) / 86400000;
             riskHtml = '<div class="bg-red-50 p-4 rounded-lg text-center" data-mkey="最大回撤"><div class="text-sm text-slate-500">最大回撤</div><div class="text-2xl font-bold text-red-700">' + maxDrawdown.toFixed(2) + '%</div></div>' +
                 '<div class="bg-red-50 p-4 rounded-lg text-center" data-mkey="回撤持续天数"><div class="text-sm text-slate-500">回撤持续天数</div><div class="text-2xl font-bold text-red-700">' + maxSpan.toFixed(0) + ' 天</div></div>' +
                 '<div class="bg-red-50 p-4 rounded-lg text-center" data-mkey="年化波动率"><div class="text-sm text-slate-500">年化波动率</div><div class="text-2xl font-bold text-red-700">' + (annualVolatility * 100).toFixed(2) + '%</div></div>' +
@@ -302,11 +289,14 @@ function buildReportInner() {
         const endDate = new Date(document.getElementById('chartEndDate').value + 'T00:00:00');
         const dates = RD.reportData.dates.map(function (s) { return new Date(s + 'T00:00:00'); });
         const filtered = dates.map(function (d, i) {
-            return { date: d, asset: RD.reportData.assets[i], nv: RD.reportData.netValues[i] };
+            return { date: d, asset: RD.reportData.assets[i], nv: RD.reportData.netValues[i], invest: (RD.reportData.invests || [])[i] || 0 };
         }).filter(function (item) { return item.date >= startDate && item.date <= endDate; });
         const chartDates = filtered.map(function (d) { return formatDate(d.date); });
         const chartAssets = filtered.map(function (d) { return d.asset; });
         const chartNetValues = filtered.map(function (d) { return d.nv; });
+        // 累计净收益 = 总资产 - 累计投入本金
+        let cumInvest = 0;
+        const chartNetProfit = filtered.map(function (d) { cumInvest += d.invest; return d.asset - cumInvest; });
 
         let benchmarkDataset = null;
         if (curBmId && filtered.length > 0) {
@@ -342,7 +332,7 @@ function buildReportInner() {
         }
         const startNetValue = chartNetValues.length > 0 ? chartNetValues[0] : 1.0;
         const netDatasets = [{
-            label: '组合净值', data: chartNetValues, borderColor: '#10b981',
+            label: '时间加权净值', data: chartNetValues, borderColor: '#10b981',
             backgroundColor: 'rgba(16,185,129,0.1)', fill: true, tension: 0.1,
             pointRadius: 0, pointHoverRadius: 6, yAxisID: 'y'
         }];
@@ -382,7 +372,10 @@ function buildReportInner() {
         if (assetChart) assetChart.destroy();
         assetChart = new Chart(assetCtx, {
             type: 'line',
-            data: { labels: chartDates, datasets: [{ label: '总资产', data: chartAssets, borderColor: '#3b82f6', backgroundColor: 'rgba(59,130,246,0.1)', fill: true, tension: 0.1, pointRadius: 0 }] },
+            data: { labels: chartDates, datasets: [
+                { label: '总资产', data: chartAssets, borderColor: '#3b82f6', backgroundColor: 'rgba(59,130,246,0.1)', fill: true, tension: 0.1, pointRadius: 0 },
+                { label: '累计净收益', data: chartNetProfit, borderColor: '#10b981', borderDash: [6, 3], backgroundColor: 'transparent', fill: false, tension: 0.1, pointRadius: 0 }
+            ] },
             options: { responsive: true, interaction: { mode: 'index' }, scales: { x: { ticks: { maxTicksLimit: 15 } } } }
         });
         renderAnalysisTable();
@@ -625,7 +618,7 @@ async function exportReportHTML() {
         '                        <table class="min-w-full bg-white border border-gray-200 rounded-lg text-sm">\n' +
         '                            <thead class="bg-gray-100"><tr>\n' +
         '                                <th class="px-4 py-2 border-b text-center">节点</th><th class="px-4 py-2 border-b text-center">日期</th>\n' +
-        '                                <th class="px-4 py-2 border-b text-center">组合净值</th><th class="px-4 py-2 border-b text-center">基准净值</th>\n' +
+        '                                <th class="px-4 py-2 border-b text-center">时间加权净值</th><th class="px-4 py-2 border-b text-center">基准净值</th>\n' +
         '                                <th class="px-4 py-2 border-b text-center">组合累计收益</th><th class="px-4 py-2 border-b text-center">基准累计收益</th>\n' +
         '                                <th class="px-4 py-2 border-b text-center">超额收益</th><th class="px-4 py-2 border-b text-center">阶段收益(组合)</th>\n' +
         '                                <th class="px-4 py-2 border-b text-center">阶段收益(基准)</th>\n' +
@@ -679,8 +672,8 @@ async function exportReportHTML() {
         '                </select>\n' +
         '            </div>\n' +
         '        </div>\n' +
-        // 组合净值 vs 比较基准（可折叠）
-        rptCollapsible('组合净值 vs 比较基准', 'rptNetValue', '<canvas id="netValueChart"></canvas>', netCollapsed) + '\n' +
+        // 时间加权净值 vs 比较基准（可折叠）
+        rptCollapsible('时间加权净值 vs 比较基准', 'rptNetValue', '<canvas id="netValueChart"></canvas>', netCollapsed) + '\n' +
         // 组合总资产曲线（可折叠）
         rptCollapsible('组合总资产曲线', 'rptAsset', '<canvas id="assetChart"></canvas>', assetCollapsed) + '\n' +
         // 关键节点对比分析（可折叠）
@@ -707,34 +700,21 @@ async function exportReportHTML() {
     URL.revokeObjectURL(url);
 }
 
-// 导出「定投策略比较」交互式 HTML 报告
-// 曲线图内联 Chart.js 重绘，并保留「按持有期月数/按日期」「净值/XIRR年化」切换功能（导出文件内可实时切换）
+// 导出「定投策略比较」HTML 报告（投资净值曲线，资金加权，起点=1.0）
 async function exportScReportHTML() {
     if (!scResults || scResults.length === 0) { alert('请先运行策略比较再导出报告'); return; }
     if (!scChart) { alert('请先运行策略比较再导出报告'); return; }
 
-    // 序列化「原始数据」而非已计算的数据集，以便在导出文件里复刻 drawScChart 的切换重算
+    // 序列化必要的原始数据（与当前主页面净值曲线口径一致）
     const scRaw = {
-        initX: scChartXMode,
-        initY: scChartYMode,
-        xirrTitle: SC_XIRR_TITLE,
-        netTitle: SC_NET_TITLE,
-        xirrNote: SC_XIRR_NOTE,
-        netNote: SC_NET_NOTE,
         results: scResults.map(function (r, idx) {
-            if (!r._runningXirr) r._runningXirr = runningXirr(r);
             const cn = fundCodeName(r.item.fund);
-            const isStopGain = r.item.strategy === '5';
             return {
                 dates: r.dates.map(function (d) { return d.getTime(); }),
                 invests: r.invests || [],
                 assets: r.assets || [],
-                peakPrincipal: r.peakPrincipal || [],
-                stopGainEvents: r.stopGainEvents || [],
-                runningXirr: r._runningXirr || [],
                 label: (cn.name || r.item.fund) + '·' + SC_STRATEGIES[r.item.strategy],
-                color: SC_COLORS[idx % SC_COLORS.length],
-                isStopGain: isStopGain
+                color: SC_COLORS[idx % SC_COLORS.length]
             };
         })
     };
@@ -768,82 +748,53 @@ async function exportScReportHTML() {
         '<body class="bg-gray-50 min-h-screen p-6">\n' +
         '    <div class="max-w-6xl mx-auto">\n' +
         '        <h1 class="text-3xl font-bold text-center mb-8 text-gray-800">📊 定投策略比较报告</h1>\n' +
-        '        <p class="text-center text-sm text-gray-400 mb-8">生成日期：' + dateStr + '（曲线图支持鼠标悬停查看各点数值，并可切换 X 轴与 Y 轴口径）</p>\n' +
-        // 指标卡（常开）
+        '        <p class="text-center text-sm text-gray-400 mb-8">生成日期：' + dateStr + '（曲线图支持鼠标悬停查看各点数值）</p>\n' +
         (metricsHtml ? '        <div class="bg-white p-6 rounded-xl shadow-md mb-6">\n' +
             '            <h3 class="text-lg font-semibold text-gray-700 mb-3">策略指标对比</h3>\n' +
             '            <div class="grid grid-cols-2 md:grid-cols-4 gap-4">' + metricsHtml + '</div>\n' +
             '        </div>\n' : '') +
-        // 曲线图（常开，带切换按钮，交互式）
         '        <div class="bg-white p-6 rounded-xl shadow-md mb-6">\n' +
-        '            <div class="flex flex-wrap items-center justify-between gap-2 mb-3">\n' +
-        '                <h3 id="scExpTitle" class="text-lg font-semibold text-gray-700"></h3>\n' +
-        '                <div class="flex flex-wrap gap-2">\n' +
-        '                    <button id="expXMonth" onclick="scSetX(\'month\')" class="px-3 py-1.5 bg-blue-600 text-white text-sm rounded">按持有期月数对齐</button>\n' +
-        '                    <button id="expXDate" onclick="scSetX(\'date\')" class="px-3 py-1.5 bg-white text-gray-700 hover:bg-gray-100 text-sm rounded">按日期</button>\n' +
-        '                    <button id="expYNet" onclick="scSetY(\'net\')" class="px-3 py-1.5 bg-blue-600 text-white text-sm rounded">净值</button>\n' +
-        '                    <button id="expYXirr" onclick="scSetY(\'xirr\')" class="px-3 py-1.5 bg-white text-gray-700 hover:bg-gray-100 text-sm rounded">XIRR年化</button>\n' +
-        '                </div>\n' +
-        '            </div>\n' +
+        '            <h3 class="text-lg font-semibold text-gray-700 mb-3">投资净值曲线（资金加权，起点=1.0）</h3>\n' +
         '            <div style="height: 420px;"><canvas id="scChartExport"></canvas></div>\n' +
-        '            <p id="scExpNote" class="text-xs text-gray-500 mt-2"></p>\n' +
+        '            <p class="text-xs text-gray-500 mt-2">* 采用资金加权的"这一笔投资净值"（起点=1.0）：当日净值 = 当日总资产 ÷ 截至当日的累计已投入本金。x 轴为各条目的持有期（月）。</p>\n' +
         '        </div>\n' +
-        // 对比表（常开）
         (tableHtml ? '        <div class="bg-white p-6 rounded-xl shadow-md mb-6">\n' +
             '            <h3 class="text-lg font-semibold text-gray-700 mb-3">策略对比明细</h3>\n' +
             '            <div class="overflow-x-auto">' + tableHtml + '</div>\n' +
             '        </div>\n' : '') +
-        // 规则（常开）
         (rulesHtml ? '        <div class="bg-white p-6 rounded-xl shadow-md mb-6">\n' +
             '            <h3 class="text-lg font-semibold text-gray-700 mb-3">策略规则说明</h3>\n' +
             rulesHtml + '\n' +
             '        </div>\n' : '') +
-        // 错误/提示（常开）
         (errorsHtml ? '        <div class="bg-white p-6 rounded-xl shadow-md mb-6">\n' +
             '            <h3 class="text-lg font-semibold text-gray-700 mb-3">提示与说明</h3>\n' +
             errorsHtml + '\n' +
             '        </div>\n' : '') +
-        '        <p class="text-center text-xs text-gray-400 mt-4">本报告由「基金定投测算工具」生成，曲线图可在浏览器中交互切换。</p>\n' +
+        '        <p class="text-center text-xs text-gray-400 mt-4">本报告由「基金定投测算工具」生成。</p>\n' +
         '    </div>\n' +
         '    <scr' + 'ipt>window.__sc__ = ' + JSON.stringify(scRaw).replace(/<\/script>/gi, '<\\/script>') + ';</scr' + 'ipt>\n' +
         '    <scr' + 'ipt>\n' +
         '        var __sc = window.__sc__;\n' +
-        '        var __x = __sc.initX, __y = __sc.initY;\n' +
-        '        var __hasSG = __sc.results.some(function (r) { return r.isStopGain; });\n' +
         '        var __chart = null;\n' +
-        '        var __on = "px-3 py-1.5 bg-blue-600 text-white text-sm rounded";\n' +
-        '        var __off = "px-3 py-1.5 bg-white text-gray-700 hover:bg-gray-100 text-sm rounded";\n' +
         '        function __fmt(d) { var t = new Date(d); if (isNaN(t)) return d; var y = t.getFullYear(); var m = ("0" + (t.getMonth() + 1)).slice(-2); var day = ("0" + t.getDate()).slice(-2); return y + "-" + m + "-" + day; }\n' +
-        '        function __build(xMode, yMode) {\n' +
-        '            var isXirr = yMode === "xirr";\n' +
+        '        function __build() {\n' +
         '            var ds = [];\n' +
         '            __sc.results.forEach(function (r) {\n' +
         '                var startTs = r.dates[0]; var cum = 0;\n' +
-        '                var pts = [], sgPts = [];\n' +
-        '                var sgSet = (r.isStopGain && r.stopGainEvents.length) ? new Set(r.stopGainEvents) : null;\n' +
+        '                var pts = [];\n' +
         '                r.dates.forEach(function (ts, i) {\n' +
         '                    cum += (r.invests[i] || 0);\n' +
         '                    var months = (ts - startTs) / (1000 * 60 * 60 * 24 * 30.4375);\n' +
-        '                    var yVal;\n' +
-        '                    if (isXirr) { var v = r.runningXirr[i]; if (v == null) return; yVal = +v.toFixed(2); }\n' +
-        '                    else {\n' +
-        '                        var nv;\n' +
-        '                        if (r.isStopGain) { var peak = r.peakPrincipal[i]; nv = peak > 0 ? 1 + (r.assets[i] - cum) / peak : null; }\n' +
-        '                        else { nv = cum > 0 ? r.assets[i] / cum : null; }\n' +
-        '                        if (nv == null) return; yVal = +nv.toFixed(4);\n' +
-        '                    }\n' +
-        '                    var xVal = xMode === "date" ? ts : +months.toFixed(2);\n' +
-        '                    pts.push({ x: xVal, y: yVal });\n' +
-        '                    if (sgSet && sgSet.has(i)) sgPts.push({ x: xVal, y: yVal });\n' +
+        '                    var nv = cum > 0 ? r.assets[i] / cum : null;\n' +
+        '                    if (nv == null) return;\n' +
+        '                    pts.push({ x: +months.toFixed(2), y: +nv.toFixed(4) });\n' +
         '                });\n' +
         '                ds.push({ label: r.label, data: pts, borderColor: r.color, backgroundColor: r.color, borderWidth: 2, pointRadius: 0, tension: 0.1, fill: false });\n' +
-        '                if (sgPts.length) ds.push({ label: r.label + "·止盈点", data: sgPts, borderColor: r.color, backgroundColor: r.color, pointStyle: "circle", pointRadius: 4, pointHoverRadius: 6, pointBorderColor: "#ffffff", pointBorderWidth: 1.5, showLine: false, fill: false, isStopGainMarker: true });\n' +
         '            });\n' +
         '            return ds;\n' +
         '        }\n' +
         '        function __render() {\n' +
-        '            var isXirr = __y === "xirr"; var isDate = __x === "date";\n' +
-        '            var ds = __build(__x, __y);\n' +
+        '            var ds = __build();\n' +
         '            var xMin = Infinity, xMax = -Infinity;\n' +
         '            ds.forEach(function (d) { d.data.forEach(function (p) { if (p.x != null && isFinite(p.x)) { if (p.x < xMin) xMin = p.x; if (p.x > xMax) xMax = p.x; } }); });\n' +
         '            if (!isFinite(xMin)) { xMin = undefined; xMax = undefined; }\n' +
@@ -855,27 +806,15 @@ async function exportScReportHTML() {
         '                    interaction: { mode: "nearest", intersect: false },\n' +
         '                    scales: {\n' +
         '                        x: { type: "linear", min: xMin, max: xMax,\n' +
-        '                            title: { display: true, text: isDate ? "日期" : "持有期（月）" },\n' +
-        '                            ticks: { maxTicksLimit: 12, callback: function (v) { return isDate ? __fmt(new Date(v)) : v + "月"; } } },\n' +
-        '                        y: { title: { display: true, text: isXirr\n' +
-        '                            ? "资金加权收益率 XIRR 年化（%）"\n' +
-        '                            : (__hasSG ? "投资净值（普通策略=总资产/累计投入；止盈策略=1+最大本金收益率，起点=1.0）" : "投资净值（资金加权，总资产/累计投入，起点=1.0）") } }\n' +
+        '                            title: { display: true, text: "持有期（月）" },\n' +
+        '                            ticks: { maxTicksLimit: 12, callback: function (v) { return v + "月"; } } },\n' +
+        '                        y: { title: { display: true, text: "归一化总资产（起点=1.0）" } }\n' +
         '                    },\n' +
-        '                    plugins: {\n' +
-        '                        legend: { position: "bottom", labels: { filter: function (item, data) { return !data.datasets[item.datasetIndex].isStopGainMarker; } } },\n' +
-        '                        tooltip: { callbacks: {\n' +
-        '                            title: function (items) { return isDate ? __fmt(new Date(items[0].parsed.x)) : (items[0].parsed.x + " 月"); },\n' +
-        '                            label: function (item) { return item.dataset.isStopGainMarker ? item.dataset.label : (isXirr ? item.parsed.y.toFixed(2) + "%" : item.parsed.y.toFixed(4)); }\n' +
-        '                        } }\n' +
-        '                    }\n' +
+        '                    plugins: { legend: { position: "bottom" } }\n' +
         '                }\n' +
         '            });\n' +
         '        }\n' +
-        '        function __applyX(m) { __x = m; document.getElementById("expXMonth").className = m === "month" ? __on : __off; document.getElementById("expXDate").className = m === "date" ? __on : __off; }\n' +
-        '        function __applyY(m) { __y = m; document.getElementById("expYNet").className = m === "net" ? __on : __off; document.getElementById("expYXirr").className = m === "xirr" ? __on : __off; var t = document.getElementById("scExpTitle"); if (t) t.textContent = m === "xirr" ? __sc.xirrTitle : __sc.netTitle; var n = document.getElementById("scExpNote"); if (n) n.textContent = m === "xirr" ? __sc.xirrNote : __sc.netNote; }\n' +
-        '        function scSetX(m) { __applyX(m); __render(); }\n' +
-        '        function scSetY(m) { __applyY(m); __render(); }\n' +
-        '        (function () { __applyX(__x); __applyY(__y); __render(); })();\n' +
+        '        __render();\n' +
         '    </scr' + 'ipt>\n' +
         '</body>\n' +
         '</html>';

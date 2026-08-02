@@ -3,7 +3,7 @@
 <head>
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
-    <title>基金组合回测工具 v20260717.1500</title>
+    <title>基金组合回测工具 v20260802.1030</title>
     <!-- 依赖库 -->
     <script src="js/xlsx.full.min.js"></script>
     <script src="https://cdn.jsdelivr.net/npm/chart.js@4.4.1/dist/chart.umd.min.js"></script>
@@ -14,7 +14,7 @@
 <body class="bg-gray-50 min-h-screen p-6">
     <div class="max-w-6xl mx-auto">
         <!-- 顶部标题栏：标题 + 项目与报告 + 模式切换 -->
-        <div class="flex flex-wrap items-center justify-between gap-4 mb-8">
+        <div class="flex flex-wrap items-center justify-between gap-4 mb-6">
             <h1 class="text-3xl font-bold text-gray-800">📊基金回测工具</h1>
                 <!-- 项目与报告工具栏 -->
                 <div class="flex flex-wrap items-center gap-3 p-3 bg-blue-50 rounded-lg border border-blue-200">
@@ -27,22 +27,24 @@
                     
                 </div>
             <div class="flex flex-wrap items-center gap-4">
-                <!-- 顶层模式切换 -->
-                <div class="flex gap-3">
-                    <button id="modeCombo" onclick="setMode('combo')" class="px-5 py-2 rounded-lg font-medium transition bg-indigo-600 text-white">模拟组合回测</button>
-                    <button id="modeStrategy" onclick="setMode('sc')" class="px-5 py-2 rounded-lg font-medium transition bg-gray-200 text-gray-700 hover:bg-gray-300">定投策略比较</button>
+                <!-- 顶层模式切换：一体化分段控件 -->
+                <div class="inline-flex p-1 bg-gray-100 rounded-lg">
+                    <button id="modeCombo" onclick="setMode('combo')" class="px-5 py-2 rounded-md font-medium transition bg-white text-indigo-700 shadow-sm">模拟组合回测</button>
+                    <button id="modeStrategy" onclick="setMode('sc')" class="px-5 py-2 rounded-md font-medium transition text-gray-600 hover:text-gray-800">定投策略比较</button>
                 </div>
-                
-                
             </div>
         </div>
 
         <!-- 数据管理模块（基金 + 基准合并，两种模式共用） -->
         <div class="bg-white p-6 rounded-xl shadow-md mb-6">
-            <h2 class="text-xl font-semibold mb-4 text-gray-700 flex items-center gap-2">
-                📁 数据管理
-                <span class="text-sm font-normal text-gray-500 ml-2">(上传基金/指数Excel，每个Sheet为一个基金/指数)</span>
-            </h2>
+            <div class="flex items-center justify-between mb-4">
+                <h2 class="text-xl font-semibold text-gray-700 flex items-center gap-2">
+                    📁 数据管理
+                    <span class="text-sm font-normal text-gray-500 ml-2">(上传基金/指数Excel，每个Sheet为一个基金/指数)</span>
+                </h2>
+                <button id="toggleDataMgmtBtn" class="text-sm text-gray-500 hover:text-gray-700 px-2 py-1 rounded border transition select-none" title="折叠/展开数据管理区域">▲ 折叠</button>
+            </div>
+            <div id="dataMgmtCollapsible">
             <div class="grid grid-cols-1 md:grid-cols-2 gap-6">
                 <!-- 左侧：基金数据上传 -->
                 <div class="border-r pr-6">
@@ -98,6 +100,7 @@
                     <button id="generateCompositeBtn" class="ml-auto bg-indigo-600 text-white px-5 py-2 rounded-lg hover:bg-indigo-700 transition disabled:opacity-50 disabled:cursor-not-allowed" disabled>✨ 生成合成基准</button>
                 </div>
             </div>
+            </div><!-- /dataMgmtCollapsible -->
 
 
         </div>
@@ -109,20 +112,28 @@
             <div class="flex items-center justify-between mb-4">
                 <h2 class="text-xl font-semibold text-gray-700">投资计划列表</h2>
                 <div class="flex gap-2">
-                    <button onclick="addPlan()" class="bg-blue-600 text-white px-4 py-2 rounded-lg hover:bg-blue-700 transition text-sm font-medium">＋ 添加计划</button>
                     <button onclick="clearAllPlans()" class="bg-gray-500 text-white px-4 py-2 rounded-lg hover:bg-gray-600 transition text-sm">清空全部计划</button>
-                    <button onclick="checkNavGaps()" class="bg-amber-500 text-white px-4 py-2 rounded-lg hover:bg-amber-600 transition text-sm">检测净值空档</button>
+                    <button onclick="checkNavGaps()" class="bg-amber-500 text-white px-4 py-2 rounded-lg hover:bg-amber-600 transition text-sm" style="display: none;">检测净值空档</button>
                 </div>
             </div>
+            <p class="text-sm text-gray-500 mb-4">为同一只（或不同）基金配置定投计划，汇总模拟组合回测，查看整体收益、风险与相关性。</p>
             <div id="planList" class="space-y-2 mb-4"></div>
             <div id="navGapHint" class="mt-3 hidden"></div>
+            <div class="flex items-center justify-between gap-3 pt-4 mt-4 border-t border-gray-100 flex-wrap">
+                <div class="flex items-center gap-3">
+                    <button onclick="addPlan()" class="bg-blue-600 text-white px-4 py-2 rounded-lg hover:bg-blue-700 transition text-sm font-medium">＋ 添加计划</button>
+                    <span id="comboPoolStat" class="text-sm font-semibold text-indigo-700 whitespace-nowrap hidden"></span>
+                    <label class="text-sm text-gray-600 whitespace-nowrap">可用最大资金池(元)</label>
+                    <input id="comboPool" type="number" min="0" class="w-40 p-2 border rounded-lg text-sm" placeholder="留空=不限制" title="所有投资共享此池，赎回回充，池不足时跳过该笔买入">
+                </div>
+                <button onclick="runBacktest()" class="bg-green-600 text-white px-8 py-3 rounded-lg hover:bg-green-700 transition font-semibold text-lg">🚀 启动回测</button>
+            </div>
         </div>
 
         <!-- 4. 回测结果 -->
         <div class="bg-white p-6 rounded-xl shadow-md mb-6" id="resultSection" style="display:none;">
             <div class="flex items-center justify-between mb-6">
                 <h2 class="text-xl font-semibold text-gray-700">回测结果</h2>
-                <button onclick="runBacktest()" class="bg-green-600 text-white px-8 py-3 rounded-lg hover:bg-green-700 transition font-semibold text-lg">🚀 启动回测</button>
             </div>
             
             <div class="relative">
@@ -140,10 +151,10 @@
                 <div class="flex flex-wrap items-center gap-3 mb-3">
                     <span class="text-sm font-medium text-gray-700">测算口径：</span>
                     <div class="inline-flex rounded-lg border border-gray-300 overflow-hidden">
-                        <button id="ppModeDca" onclick="setProfitMode('dca')" class="px-3 py-1.5 text-sm bg-blue-600 text-white">定投模拟</button>
-                        <button id="ppModeTwr" onclick="setProfitMode('twr')" class="px-3 py-1.5 text-sm bg-white text-gray-700 hover:bg-gray-100">组合净值</button>
+                        <button id="ppModeDca" onclick="setProfitMode('dca')" class="px-3 py-1.5 text-sm bg-blue-600 text-white">资金加权</button>
+                        <button id="ppModeTwr" onclick="setProfitMode('twr')" class="px-3 py-1.5 text-sm bg-white text-gray-700 hover:bg-gray-100">时间加权净值</button>
                     </div>
-                    <span class="text-xs text-gray-400">定投模拟=资金加权（推荐）；组合净值=一次性买入时间加权</span>
+                    <span class="text-xs text-gray-400">资金加权=实际定投收益（推荐）；时间加权净值=剔除投入节奏、反映标的本身涨跌（即一次性买入并持有）</span>
                 </div>
                 <p class="text-sm text-gray-500 mb-4">历史任意时点起投，持有满对应时长后的盈利概率、平均持有收益与年化收益率（持有期以交易日近似，1 自然年 ≈ 252 交易日）。</p>
                 <div class="flex flex-wrap items-center gap-3 mb-4">
@@ -198,11 +209,12 @@
             <div class="space-y-8 mt-8">
                 <div id="netValueChartCard" class="bg-white p-6 rounded-xl shadow-md">
                     <div class="flex items-center justify-between mb-4">
-                        <h3 class="text-lg font-semibold text-gray-700">组合净值 vs 比较基准</h3>
+                        <h3 class="text-lg font-semibold text-gray-700">时间加权净值 vs 比较基准</h3>
                         <button id="toggleNetValueChartBtn" class="text-sm text-gray-500 hover:text-gray-700 px-2 py-1 rounded border">▼ 展开</button>
                     </div>
                     <div id="netValueChartCollapsible" class="hidden">
                         <canvas id="netValueChart"></canvas>
+                        <p class="text-xs text-gray-500 mt-2">* 采用<b>时间加权净值</b>（份额法，起点=1.0）：剔除投入时点差异，反映组合标的本身的涨跌（等价于一次性买入并持有），与比较基准可比。</p>
                     </div>
                 </div>
                 <div id="assetChartCard" class="bg-white p-6 rounded-xl shadow-md">
@@ -227,7 +239,7 @@
                                     <tr>
                                         <th class="px-4 py-2 border-b text-center">节点</th>
                                         <th class="px-4 py-2 border-b text-center">日期</th>
-                                        <th class="px-4 py-2 border-b text-center">组合净值</th>
+                                        <th class="px-4 py-2 border-b text-center">时间加权净值</th>
                                         <th class="px-4 py-2 border-b text-center">基准净值</th>
                                         <th class="px-4 py-2 border-b text-center">组合累计收益</th>
                                         <th class="px-4 py-2 border-b text-center">基准累计收益</th>
@@ -253,7 +265,7 @@
                     <span id="periodRangeLabel" class="text-sm font-normal text-gray-500"></span>
                 </h3>
                 <div id="periodMetrics" class="grid grid-cols-1 md:grid-cols-4 gap-4"></div>
-                <p class="text-xs text-gray-500 mt-2">* 区间本金/市值/分红/总资产为所选日期范围内统计；区间收益与风险指标基于组合净值序列在该窗口内计算，并随上方日期筛选动态更新。</p>
+                <p class="text-xs text-gray-500 mt-2">* 区间本金/市值/分红/总资产为所选日期范围内统计；区间收益与风险指标基于时间加权净值序列在该窗口内计算，并随上方日期筛选动态更新。</p>
             </div>
         </div>
         </div><!-- /comboBacktestRoot -->
@@ -263,14 +275,22 @@
             <!-- 标题 + 配置区：独立全宽白卡片（与组合模式各区块等宽） -->
             <div class="bg-white p-6 rounded-xl shadow-md mb-6">
                 <div class="flex items-center justify-between mb-4">
-                    <h2 class="text-xl font-semibold text-gray-700">📊 定投策略比较</h2>
-                    <button onclick="runStrategyCompare()" class="bg-green-600 text-white px-8 py-3 rounded-lg hover:bg-green-700 transition font-semibold text-lg">🚀 运行比较</button>
+                    <h2 class="text-xl font-semibold text-gray-700">定投策略比较</h2>
+                    <div class="flex gap-2">
+                        <button onclick="clearAllScItems()" class="bg-gray-500 text-white px-4 py-2 rounded-lg hover:bg-gray-600 transition text-sm">清空全部对比条目</button>
+                    </div>
                 </div>
                 <p class="text-sm text-gray-500 mb-4">在同一只（或不同）基金上运行多种定投策略，横向对比收益与风险。可添加多条对比条目（基金 × 策略 × 参数），支持单基金的多种策略或其他基金的其他策略并行比较。</p>
 
                 <div id="scItemList" class="space-y-3 mb-4"></div>
-                <div class="flex flex-wrap gap-2 mb-4">
-                    <button onclick="addScItem()" class="bg-blue-600 text-white px-4 py-2 rounded-lg hover:bg-blue-700 transition text-sm font-medium">＋ 添加对比条目</button>
+                <div class="flex items-center justify-between gap-3 pt-4 mt-4 border-t border-gray-100 flex-wrap">
+                    <div class="flex items-center gap-3">
+                        <button onclick="addScItem()" class="bg-blue-600 text-white px-4 py-2 rounded-lg hover:bg-blue-700 transition text-sm font-medium">＋ 添加对比条目</button>
+                        <span id="scPoolStat" class="text-sm font-semibold text-indigo-700 whitespace-nowrap hidden"></span>
+                        <label class="text-sm text-gray-600 whitespace-nowrap">可用最大资金池(元)</label>
+                        <input id="scPool" type="number" min="0" class="w-40 p-2 border rounded-lg text-sm" placeholder="留空=不限制" title="所有投资共享此池，赎回回充，池不足时跳过该笔买入">
+                    </div>
+                    <button onclick="runStrategyCompare()" class="bg-green-600 text-white px-8 py-3 rounded-lg hover:bg-green-700 transition font-semibold text-lg">🚀 运行比较</button>
                 </div>
                 <div id="scErrors"></div>
             </div>
@@ -282,48 +302,65 @@
                 <div class="bg-white p-6 rounded-xl shadow-md mb-6">
                     <h3 class="text-lg font-semibold mb-3 text-gray-700 flex items-center justify-between flex-wrap gap-2">
                         <span id="scChartTitle">投资净值曲线（资金加权，起点=1.0）</span>
-                        <span class="inline-flex flex-row gap-2 items-center">
+                        <span class="inline-flex flex-row gap-2 items-center justify-end">
                             <span class="inline-flex rounded-lg border border-gray-300 overflow-hidden text-sm">
                                 <button id="scXMonth" onclick="setScXMode('month')" class="px-3 py-1.5 bg-blue-600 text-white">按持有期月数对齐</button>
                                 <button id="scXDate" onclick="setScXMode('date')" class="px-3 py-1.5 bg-white text-gray-700 hover:bg-gray-100">按日期</button>
                             </span>
-                            <span class="inline-flex rounded-lg border border-gray-300 overflow-hidden text-sm">
-                                <button id="scYNet" onclick="setScYMode('net')" class="px-3 py-1.5 bg-blue-600 text-white">净值</button>
-                                <button id="scYXirr" onclick="setScYMode('xirr')" class="px-3 py-1.5 bg-white text-gray-700 hover:bg-gray-100">XIRR年化</button>
-                            </span>
                         </span>
                     </h3>
+                    <div class="flex items-center justify-end gap-2 mb-3">
+                        <!-- Y 轴口径切换组互斥容器：宽度固定，净值模式显示组A、XIRR 模式显示组B，贴近右侧"净值/XIRR年化"组左侧 -->
+                        <span id="scYOptGroup" class="inline-flex justify-end min-w-[440px]">
+                            <span id="scNetToggle" class="inline-flex rounded-lg border border-gray-300 overflow-hidden text-sm">
+                                <button id="scNetMw" onclick="setScNetMode('mw')" class="px-3 py-1.5 min-w-[84px] bg-blue-600 text-white">资金加权</button>
+                                <button id="scNetPf" onclick="setScNetMode('portfolio')" class="px-3 py-1.5 min-w-[84px] bg-white text-gray-700 hover:bg-gray-100">时间加权净值</button>
+                            </span>
+                            <!-- XIRR 滚动窗口（可多选叠加），仅 XIRR 模式显示，净值模式由 setScYMode 隐藏 -->
+                            <span id="scXirrWindowGroup" class="inline-flex rounded-lg border border-gray-300 overflow-hidden text-sm" style="display:none;" title="可多选叠加：累计 / 1年 / 3年 / 5年滚动 XIRR">
+                                <button id="scXirrCum" onclick="toggleScXirrWindow('cum')" class="px-3 py-1.5 min-w-[84px] bg-blue-600 text-white">累计</button>
+                                <button id="scXirrY1" onclick="toggleScXirrWindow('y1')" class="px-3 py-1.5 min-w-[84px] bg-white text-gray-700 hover:bg-gray-100">1年滚动</button>
+                                <button id="scXirrY3" onclick="toggleScXirrWindow('y3')" class="px-3 py-1.5 min-w-[84px] bg-white text-gray-700 hover:bg-gray-100">3年滚动</button>
+                                <button id="scXirrY5" onclick="toggleScXirrWindow('y5')" class="px-3 py-1.5 min-w-[84px] bg-white text-gray-700 hover:bg-gray-100">5年滚动</button>
+                            </span>
+                        </span>
+                        <span class="inline-flex rounded-lg border border-gray-300 overflow-hidden text-sm">
+                            <button id="scYNet" onclick="setScYMode('net')" class="px-3 py-1.5 bg-blue-600 text-white">净值</button>
+                            <button id="scYXirr" onclick="setScYMode('xirr')" class="px-3 py-1.5 bg-white text-gray-700 hover:bg-gray-100">XIRR年化</button>
+                        </span>
+                    </div>
                     <div class="is-2"><canvas id="scChart"></canvas></div>
-                    <p class="text-xs text-gray-500 mt-2" id="scChartNote">* 采用资金加权的"这一笔投资净值"（起点=1.0）：当日净值 = 当日总资产 ÷ 截至当日的累计已投入本金。该口径保留了投入节奏的影响——上涨市中单笔（一次投入）会跑在定投（分批投入）上方，能直接看出策略差异；可切换"按持有期月数对齐"（各条目从0月对齐便于跨条目对比）或"按日期"（按真实日历日期错开显示），并可在"净值 / XIRR年化"间切换 y 轴口径。</p>
+                    <p class="text-xs text-gray-500 mt-2" id="scChartNote">* 采用资金加权净值（起点=1.0）：当日净值 = 当日总资产 ÷ 截至当日的累计已投入本金。该口径保留了投入节奏的影响——上涨市中单笔（一次投入）会跑在定投（分批投入）上方，能直接看出策略差异；可切换"按持有期月数对齐"（各条目从0月对齐便于跨条目对比）或"按日期"（按真实日历日期错开显示），并可在"净值 / XIRR年化"间切换 y 轴口径；切到"XIRR年化"后可多选叠加"累计 / 1年 / 3年 / 5年滚动"窗口；"按日期"模式下 x 轴刻度自动对齐到季度末 / 半年末等规整日历时点（跨度长时降为年末），便于按真实时间定位。</p>
                 </div>
 
                 <div class="bg-white p-6 rounded-xl shadow-md mb-6">
                     <h3 class="text-lg font-semibold mb-3 text-gray-700">策略对比表</h3>
                     <div class="overflow-x-auto">
-                    <table class="w-auto bg-white border border-gray-200 rounded-lg text-xs whitespace-nowrap">
+                    <table class="w-full bg-white border border-gray-200 rounded-lg text-xs whitespace-nowrap">
                         <thead class="bg-gray-100">
                             <tr>
                                 <th class="px-2 py-2 border-b text-center whitespace-nowrap">代码</th>
                                 <th class="px-2 py-2 border-b text-center whitespace-nowrap">基金</th>
-                                <th class="px-2 py-2 border-b text-center whitespace-nowrap">策略</th>
-                                <th class="px-2 py-2 border-b text-center whitespace-nowrap">总投入本金</th>
+                                <th class="px-2 py-2 border-b text-center whitespace-nowrap">投资方式</th>
+                                <th class="px-2 py-2 border-b text-center whitespace-nowrap">止盈方式</th>
+                                <th class="px-2 py-2 border-b text-center whitespace-nowrap">总投本金</th>
                                 <th class="px-2 py-2 border-b text-center whitespace-nowrap">期末总资产</th>
-                                <th class="px-2 py-2 border-b text-center whitespace-nowrap">累计收益率</th>
+                                <th class="px-2 py-2 border-b text-center whitespace-nowrap">累计收益</th>
                                 <th class="px-2 py-2 border-b text-center whitespace-nowrap">XIRR年化</th>
                                 <th class="px-2 py-2 border-b text-center whitespace-nowrap">最大回撤</th>
                                 <th class="px-2 py-2 border-b text-center whitespace-nowrap">年化波动率</th>
                                 <th class="px-2 py-2 border-b text-center whitespace-nowrap">夏普</th>
                                 <th class="px-2 py-2 border-b text-center whitespace-nowrap">止盈次数</th>
-                                <th class="px-2 py-2 border-b text-center whitespace-nowrap">最大投入本金</th>
-                                <th class="px-2 py-2 border-b text-center whitespace-nowrap">峰值本金收益率</th>
+                                <th class="px-2 py-2 border-b text-center whitespace-nowrap">最大本金</th>
+                                <th class="px-2 py-2 border-b text-center whitespace-nowrap">最大本金收益率</th>
                                 <th class="px-2 py-2 border-b text-center whitespace-nowrap">累积赎回</th>
-                                <th class="px-2 py-2 border-b text-center whitespace-nowrap">累积现金红利</th>
+                                <th class="px-2 py-2 border-b text-center whitespace-nowrap">累积红利</th>
                             </tr>
                         </thead>
                         <tbody id="scTableBody"></tbody>
                     </table>
                     </div>
-                    <p class="text-xs text-gray-500 mt-2">* 指标口径与组合回测一致；累计收益率 = 期末总资产 / 总投入本金 − 1。目标止盈策略（策略5）不展示累计收益率（以“—”表示），仅展示峰值本金收益率；其余策略不展示峰值本金收益率。</p>
+                    <p class="text-xs text-gray-500 mt-2">* 指标口径与组合回测一致；累计收益率 = 期末总资产 / 总投入本金 − 1。启用止盈方式（目标止盈 / 回撤比例止盈 / 固定收益比例止盈）时，不展示累计收益率（以“—”表示），仅展示峰值本金收益率；未启用止盈时则不展示峰值本金收益率。</p>
                 </div>
 
                 <div class="bg-white p-6 rounded-xl shadow-md">

@@ -28,10 +28,23 @@ async function refreshBenchmarkCache() {
 // 基准列表渲染（含日期范围）
 async function loadBenchmarkList() {
     compositeWeights = {}; // 新增：每次刷新基准列表时清空临时权重
-    const benchmarks = await db.benchmarks.toArray();
+    let benchmarks = await db.benchmarks.toArray();
+    // 升级逻辑：为缺失 order 的旧基准（多为早期合成基准）补赋值，统一排到末尾（maxOrder+1 递增）
+    const noOrder = benchmarks.filter(b => b.order === undefined || b.order === null);
+    if (noOrder.length) {
+        let maxOrder = benchmarks.length ? Math.max(0, ...benchmarks.map(b => b.order || 0)) : 0;
+        for (const b of noOrder) {
+            maxOrder += 1;
+            await db.benchmarks.update(b.id, { order: maxOrder });
+            b.order = maxOrder;
+        }
+    }
     benchmarks.sort((a, b) => (a.order || 0) - (b.order || 0));
     // 未选中任何基准时，默认选中第一个（写入顺序首条），使"基准指数工作日检测"立即生效
-    if (!currentBenchmarkId && benchmarks.length > 0) currentBenchmarkId = benchmarks[0].id;
+    const validIds = new Set(benchmarks.map(b => b.id));
+    if (benchmarks.length > 0 && (!currentBenchmarkId || !validIds.has(currentBenchmarkId))) {
+        currentBenchmarkId = benchmarks[0].id;
+    }
     const container = document.getElementById('benchmarkList');
     const select = document.getElementById('benchmarkSelect');
     
@@ -91,6 +104,7 @@ async function loadBenchmarkList() {
         if (backtestResult.dates.length) updateCharts(); // 这会触发图表和表格的更新
     };
     refreshBenchmarkCache();   // 基准列表变化（初始化/上传/删除）后刷新参照日历缓存
+    if (typeof updateDataMgmtCollapse === 'function') updateDataMgmtCollapse();
 }
 
 // 渲染合成基准的权重输入界面
@@ -255,7 +269,9 @@ async function generateCompositeBenchmark() {
     }
     const name = '合成_' + nameParts.join('+');
 
-    await db.benchmarks.add({ name, data: compositeData });
+    const existing = await db.benchmarks.toArray();
+    const maxOrder = existing.length ? Math.max(0, ...existing.map(b => b.order || 0)) : 0;
+    await db.benchmarks.add({ name, data: compositeData, order: maxOrder + 1 });
     compositeWeights = {};
     document.getElementById('compositePanel').classList.add('hidden');
     await loadBenchmarkList();
