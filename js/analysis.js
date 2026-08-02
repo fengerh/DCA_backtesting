@@ -81,7 +81,7 @@ function simulateDcaWindow(winStartIdx, winEndIdx) {
 }
 
 // 给定持有期（交易日），按指定口径计算盈利概率、平均持有收益与平均年化收益
-// mode: 'dca' = 定投模拟（资金加权，推荐）；'twr' = 组合净值（一次性买入，时间加权）
+// mode: 'dca' = 资金加权（实际定投，推荐）；'twr' = 时间加权净值（TWR；一次性买入场景）
 function calcProfit(holdDays, mode) {
     mode = mode || 'dca';
     const nv = backtestResult.netValues || [];
@@ -128,7 +128,7 @@ function setProfitMode(mode) {
 }
 
 // 批量计算盈利概率（异步分块 + 进度），彻底避免切换口径时主线程阻塞
-// periods: [{label, days}]，mode: 'dca'（定投模拟）| 'twr'（组合净值）
+// periods: [{label, days}]，mode: 'dca'（资金加权）| 'twr'（时间加权净值）
 // 返回 results: { [days]: {winRate, avgReturn, avgAnnual, samples, annualSamples} | null }
 let ppComputeToken = 0;
 function computeProfitProbabilityAsync(periods, mode, onProgress, onDone) {
@@ -140,7 +140,7 @@ function computeProfitProbabilityAsync(periods, mode, onProgress, onDone) {
     const validPeriods = periods.filter(p => n > p.days);
     if (validPeriods.length === 0) { onDone(result); return; }
 
-    // 时间加权（组合净值）口径：O(n) 极快，同步即可
+    // 时间加权净值（TWR）口径：O(n) 极快，同步即可
     if (mode === 'twr') {
         validPeriods.forEach(p => {
             const holdDays = p.days;
@@ -338,7 +338,7 @@ function renderProfitProbability() {
             </tr>`;
         });
         if (!any) { sec.style.display = 'none'; return; }
-        const modeLabel = profitMode === 'dca' ? '定投模拟（资金加权，按计划规则在历史任意时点起投）' : '组合净值（一次性买入，时间加权）';
+        const modeLabel = profitMode === 'dca' ? '资金加权（定投模拟，按计划规则在历史任意时点起投）' : '时间加权净值（一次性买入，时间加权）';
         const ppDefaultWidths = ['14%', '14%', '16%'];
         const ppHeaders = ['持有时长', '平均收益', '年化收益率'];
         let ppHeadHtml = '';
@@ -527,13 +527,54 @@ async function updateCharts() {
         for (let i = 0; i < redeemedCumFull.length; i++) { if (idxMap.has(i)) run += idxMap.get(i); redeemedCumFull[i] = run; }
     }
 
-    const filtered = backtestResult.dates.map((d,i)=>({date:d, asset:backtestResult.assets[i], nv:backtestResult.netValues[i], cashDiv:(backtestResult.cashDivs||[])[i]||0, redeemed:redeemedCumFull[i]}))
+    const filtered = backtestResult.dates.map((d,i)=>({idx:i, date:d, asset:backtestResult.assets[i], nv:backtestResult.netValues[i], invest:(backtestResult.invests||[])[i]||0, cashDiv:(backtestResult.cashDivs||[])[i]||0, redeemed:redeemedCumFull[i]}))
         .filter(item => item.date >= startDate && item.date <= endDate);
     const chartDates = filtered.map(d => formatDate(d.date));
     const chartAssets = filtered.map(d => d.asset);
     const chartNetValues = filtered.map(d => d.nv);
     const chartCashDivs = filtered.map(d => d.cashDiv);
     const chartRedeemed = filtered.map(d => d.redeemed);
+    // 累计净收益 = 总资产 - 累计投入本金
+    let cumInvest = 0;
+    const chartNetProfit = filtered.map(d => { cumInvest += d.invest; return d.asset - cumInvest; });
+    // 资金加权净值（mw）——份额法，保留投入/取出节奏：
+    //   · 用每日组合总价值(持仓市值+落袋现金)的涨跌幅平移净值；
+    //   · 每日现金流(投入为正流出、取出为正流入)按前一日净值折算为本金份额的增减。
+    // 落袋现金(分红/止盈)本质是“从组合取出”，会从本金基数扣除，不会像旧公式(总资产÷累计投入)
+    // 那样因为分子里永远留着死现金、分母随定投增大而被稀释逐降。起点=1.0。
+    const inv = backtestResult.invests || [];
+    const totalCash = backtestResult.totalCashSeries || [];
+    const fullMwValues = [];
+    let mwNav = 1.0, prevAsset = null, base = 0;
+    for (let i = 0; i < backtestResult.dates.length; i++) {
+        const asset = backtestResult.assets[i];
+        if (prevAsset === null) {
+            // 首笔：以首笔投入建立本金份额，净值保持 1.0
+            const cf0 = (inv[i] || 0) - (totalCash[i] || 0);
+            if (asset > 0) { base = asset; } // 期初本金=期初资产(无取出时)
+            else { base = 0; }
+            mwNav = 1.0;
+        } else {
+            const growth = prevAsset > 0 ? (asset / prevAsset) : 1;
+            mwNav = mwNav * growth;                       // 先按组合涨跌平移
+        }
+        // 处理当日现金流：取出现金 = 落袋现金余额的当日增量(分红+止盈)
+        if (i > 0) {
+            const withdrawal = Math.max(0, (totalCash[i] || 0) - (totalCash[i - 1] || 0));
+            const cf = (inv[i] || 0) - withdrawal;        // 净流入(投入为正、取出为负)
+            if (cf !== 0 && prevAsset !== null) base += cf / mwNav; // 前一日净值折算本金份额
+        }
+        fullMwValues.push(asset > 0 || (inv[i] || 0) > 0 || (totalCash[i] || 0) > 0 ? mwNav : null);
+        prevAsset = asset;
+    }
+    const chartMwValues = filtered.map(f => fullMwValues[f.idx]);
+    // 资金加权净值在图表窗口内归一化为起点=1.0，与时间加权净值保持同样的直观起点
+    const firstMwValidIdx = chartMwValues.findIndex(v => v != null && isFinite(v));
+    const mwBase = firstMwValidIdx >= 0 ? chartMwValues[firstMwValidIdx] : 1.0;
+    const normChartMwValues = chartMwValues.map(v => (v != null && mwBase > 0) ? (v / mwBase) : null);
+    const refNetValues = chartNetValues;
+    const _firstValid = refNetValues.find(v => v != null && isFinite(v));
+    const startNetValue = _firstValid != null ? _firstValid : 1.0;
 
     // 止盈触发标注：按日期聚合各基金止盈事件，与图表日期对齐
     const stopGainByDate = new Map();
@@ -566,16 +607,16 @@ async function updateCharts() {
                 if (rawBenchValues[i] === null) rawBenchValues[i] = rawBenchValues[i-1];
             }
             
-            // 基准对齐到组合净值起点：寻找首个“组合净值有效 且 基准净值有效”的位置
+            // 基准对齐到当前净值口径起点：寻找首个“当前净值有效 且 基准净值有效”的位置
             let alignIdx = -1, alignBenchNav = null, alignNetValue = null;
             for (let i = 0; i < rawBenchValues.length; i++) {
-                if (rawBenchValues[i] !== null && chartNetValues[i] != null && chartNetValues[i] > 0) {
-                    alignIdx = i; alignBenchNav = rawBenchValues[i]; alignNetValue = chartNetValues[i]; break;
+                if (rawBenchValues[i] !== null && refNetValues[i] != null && refNetValues[i] > 0) {
+                    alignIdx = i; alignBenchNav = rawBenchValues[i]; alignNetValue = refNetValues[i]; break;
                 }
             }
             
             if (alignIdx !== -1 && alignBenchNav > 0) {
-                // 在组合净值起点处，把基准缩放为与组合净值相等（基准去靠拢组合净值起点）
+                // 在当前净值口径起点处，把基准缩放为与当前净值相等（基准去靠拢当前净值起点）
                 const scale = alignNetValue / alignBenchNav;
                 
                 // 生成缩放后的基准序列（缺失值填 null，绘图时 Chart.js 会忽略）
@@ -597,13 +638,12 @@ async function updateCharts() {
     }
 
 
-    // 组合净值数据
-    const startNetValue = chartNetValues.length > 0 ? chartNetValues[0] : 1.0;
-    
+    // 资金加权模式下，比较基准仅作参考（其差距混入了投入节奏因素）
+
     // 准备数据集（显式绑定 yAxisID）
     const netDatasets = [{
-        label: '组合净值',
-        data: chartNetValues,
+        label: '时间加权净值',
+        data: refNetValues,
         borderColor: '#10b981',
         backgroundColor: 'rgba(16,185,129,0.1)',
         fill: true,
@@ -634,12 +674,14 @@ async function updateCharts() {
     }
 
     // 计算所有数据的最小/最大值（用于右侧轴对齐）
-    const allNumericValues = chartNetValues.concat(
+    const allNumericValues = refNetValues.concat(
         benchmarkDataset ? benchmarkDataset.data.filter(v => v !== null && !isNaN(v)) : []
     );
     const minVal = Math.min(...allNumericValues);
     const maxVal = Math.max(...allNumericValues);
     const padding = (maxVal - minVal) * 0.05; // 5% 边距
+
+    // 图表标题与脚注已在 HTML 静态写好（仅保留时间加权净值口径）
 
     // 销毁旧图表
     const netCtx = document.getElementById('netValueChart').getContext('2d');
@@ -712,6 +754,11 @@ async function updateCharts() {
         label: '总资产', data: chartAssets, borderColor: '#3b82f6',
         backgroundColor: 'rgba(59,130,246,0.1)', fill: true, tension: 0.1, pointRadius: 0
     }];
+    // 累计净收益（总资产 - 累计投入本金）
+    assetDatasets.push({
+        label: '累计净收益', data: chartNetProfit, borderColor: '#10b981',
+        borderDash: [6, 3], backgroundColor: 'transparent', fill: false, tension: 0.1, pointRadius: 0
+    });
     // 现金红利金额（逐日累计，始终显示）
     assetDatasets.push({
         label: '现金红利金额', data: chartCashDivs, borderColor: '#f59e0b',
@@ -769,6 +816,9 @@ async function updateCharts() {
     renderAnalysisTable();
     renderPeriodMetrics();
 }
+
+// 资金加权净值选项已取消，仅保留时间加权净值口径（保留空函数以防旧引用报错）
+function setComboNetMode(mode) { /* no-op */ }
 
 // 渲染「选定区间投资表现」指标卡（复用与整体相同的算法口径，仅作用于所选日期窗口）
 function renderPeriodMetrics() {
@@ -834,21 +884,24 @@ function renderPeriodMetrics() {
         const mean = dailyReturns.reduce((a, b) => a + b, 0) / dailyReturns.length;
         const variance = dailyReturns.reduce((a, b) => a + Math.pow(b - mean, 2), 0) / dailyReturns.length;
         const annualVolatility = Math.sqrt(variance) * Math.sqrt(252);
-        let peak = nvs[0], maxDrawdown = 0;
-        for (const v of nvs) { if (v > peak) peak = v; const dd = (v - peak) / peak; if (dd < maxDrawdown) maxDrawdown = dd; }
+        let peak = nvs[0], maxDrawdown = 0, worstPeakIdx = 0, worstTroughIdx = 0, peakIdx = 0;
+        for (let i = 0; i < n; i++) {
+            if (nvs[i] > peak) { peak = nvs[i]; peakIdx = i; }
+            const dd = (nvs[i] - peak) / peak;
+            if (dd < maxDrawdown) { maxDrawdown = dd; worstPeakIdx = peakIdx; worstTroughIdx = i; }
+        }
         maxDrawdown *= 100;
         let sharpeRatio = NaN, calmarRatio = NaN;
         if (annualVolatility > 0) sharpeRatio = (annualReturnTwr - RISK_FREE_RATE) / annualVolatility;
         if (maxDrawdown !== 0) calmarRatio = annualReturnTwr / Math.abs(maxDrawdown / 100);
-        let peakV = nvs[0], ddFrom = null, maxSpan = 0;
-        for (let i = 0; i < n; i++) {
-            if (nvs[i] > peakV) { peakV = nvs[i]; ddFrom = null; }
-            else if (nvs[i] < peakV) {
-                if (ddFrom === null) ddFrom = i;
-                const span = (wDates[i] - wDates[ddFrom]) / 86400000;
-                if (span > maxSpan) maxSpan = span;
-            }
-        }
+        // 回撤持续天数 = 最大回撤区间（峰值→谷值）经历的自然日，与后续是否创新高无关
+        let maxSpan = (wDates[worstTroughIdx] - wDates[worstPeakIdx]) / 86400000;
+        periodDdIntervals = {
+            maxDDPeak: maxDrawdown < 0 ? formatDate(wDates[worstPeakIdx]) : '',
+            maxDDTrough: maxDrawdown < 0 ? formatDate(wDates[worstTroughIdx]) : '',
+            ddDurPeak: maxSpan > 0 ? formatDate(wDates[worstPeakIdx]) : '',
+            ddDurTrough: maxSpan > 0 ? formatDate(wDates[worstTroughIdx]) : ''
+        };
         riskHtml = `
             <div class="bg-red-50 p-4 rounded-lg text-center" data-mkey="最大回撤"><div class="text-sm text-slate-500">最大回撤</div><div class="text-2xl font-bold text-red-700">${maxDrawdown.toFixed(2)}%</div></div>
             <div class="bg-red-50 p-4 rounded-lg text-center" data-mkey="回撤持续天数"><div class="text-sm text-slate-500">回撤持续天数</div><div class="text-2xl font-bold text-red-700">${maxSpan.toFixed(0)} 天</div></div>
@@ -856,6 +909,7 @@ function renderPeriodMetrics() {
             <div class="bg-red-50 p-4 rounded-lg text-center" data-mkey="夏普/卡玛"><div class="text-sm text-slate-500">夏普/卡玛</div><div class="text-2xl font-bold text-red-700">${isNaN(sharpeRatio) ? '-' : sharpeRatio.toFixed(2)}/${isNaN(calmarRatio) ? '-' : calmarRatio.toFixed(2)}</div></div>
         `;
     } else {
+        periodDdIntervals = null;
         riskHtml = `<div class="bg-gray-100 p-4 rounded-lg text-center col-span-4" data-mkey="风险指标"><div class="text-sm text-gray-600">风险指标</div><div class="text-xl font-medium text-gray-500">区间交易日不足${MIN_TRADE_DAYS}个，以下指标暂不可用</div></div>`;
     }
 
@@ -876,17 +930,28 @@ function renderPeriodMetrics() {
 }
 
 // ============ 指标卡悬停解释 ============
+let periodDdIntervals = null;
 const METRIC_TIPS = {
     "总投入本金": "回测区间内实际投入的所有资金（定投扣款+一次性买入），不含分红再投。即你的成本基数。",
     "持仓市值": "期末仍持有的份额 × 最新净值，不含已到手现金分红。",
     "累计现金分红": "累计收到的、未再投的现金分红；红利再投模式下为 0。",
     "总资产": "持仓市值 + 累计现金分红，即组合上的全部家当。",
-    "累计收益率": "资金加权口径：(总资产 ÷ 本金 − 1)。<br>正数代表整体实际赚钱。",
-    "XIRR年化": "把每笔投入/分红/市值都当作现金流，算考虑时间权重的年化内部收益率。<br>早投的钱权重更高，比累计收益率更公平。",
-    "年化收益率(时间加权)": "把组合净值序列年化（剔除你的投入节奏），反映“组合本身”的赚钱能力。",
+    "累计收益率(资金加权)": "资金加权口径：(总资产 ÷ 本金 − 1)。<br>正数代表整体实际赚钱。",
+    "XIRR年化(资金加权)": "把每笔投入/分红/市值都当作现金流，算考虑时间权重的年化内部收益率。<br>早投的钱权重更高，比累计收益率更公平。",
+    "年化收益率(时间加权净值)": "把时间加权净值序列年化（剔除你的投入节奏），反映“组合本身”的赚钱能力。",
     "胜率(正收益日占比)": "上涨交易日数 ÷ 总交易日数，越高说明日子大多在涨。",
-    "最大回撤": "净值从最高点到最低点的最大跌幅(%)，越大代表最坏情况越惨。",
-    "回撤持续天数": "最长一次从顶部跌下、再回到新高所经历的天数，越久越磨人。",
+    "最大回撤": (sectionId) => {
+        const src = sectionId === 'metrics' ? (typeof backtestResult !== 'undefined' ? backtestResult : {}) : (periodDdIntervals || {});
+        const pk = src.maxDDPeak, tr = src.maxDDTrough;
+        const range = pk && tr ? `<br>对应区间：<b>${pk}</b> ~ <b>${tr}</b>` : '<br>（区间无回撤）';
+        return "净值从最高点到最低点的最大跌幅(%)，越大代表最坏情况越惨。" + range;
+    },
+    "回撤持续天数": (sectionId) => {
+        const src = sectionId === 'metrics' ? (typeof backtestResult !== 'undefined' ? backtestResult : {}) : (periodDdIntervals || {});
+        const pk = src.ddDurPeak, tr = src.ddDurTrough;
+        const range = pk && tr ? `<br>对应区间：<b>${pk}</b> ~ <b>${tr}</b>` : '<br>（区间无回撤）';
+        return "最长一次从顶部跌下、再回到新高所经历的天数，越久越磨人。" + range;
+    },
     "年化波动率": "日收益波动 × √252，衡量价格颠簸程度，越大越刺激。",
     "夏普/卡玛": "夏普=(年化收益−无风险利率)÷波动率；<br>卡玛=年化收益÷最大回撤。<br>两个都是越高越好。",
     "区间投入本金": "选定图表区间内实际投入的资金（定投+一次性买入），不含分红再投。",
@@ -921,7 +986,7 @@ function initMetricTooltip() {
             const cell = e.target.closest('[data-mkey]');
             if (!cell) { tip.style.display = 'none'; return; }
             const key = cell.dataset.mkey;
-            const txt = METRIC_TIPS[key];
+            const txt = typeof METRIC_TIPS[key] === 'function' ? METRIC_TIPS[key](id) : METRIC_TIPS[key];
             if (!txt) { tip.style.display = 'none'; return; }
             tip.innerHTML = '<b>' + key + '</b><br>' + txt;
             tip.style.display = 'block';
@@ -1062,7 +1127,7 @@ async function renderAnalysisTable() {
         }
     }
 
-    // 投资最早日期的组合净值作为累计收益基准
+    // 投资最早日期的时间加权净值作为累计收益基准
     const baseIdx = nodes[0].idx;
     const baseComboNav = netValues[baseIdx];
 

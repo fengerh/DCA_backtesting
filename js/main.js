@@ -18,5 +18,9 @@ setMode('combo');
     try {
         const ok = await loadFundsFromDB();
         if (ok) { refreshFundUI(); }
+        // 基金异步加载完成后，重新应用当前模式：确保组合回测卡片可见，
+        // 并在有基金数据且无计划时自动生成一条默认计划（首屏 setMode 时基金尚未加载，hasFundData 为 false）
+        if (currentMode) setMode(currentMode);
+        if (typeof updateDataMgmtCollapse === 'function') updateDataMgmtCollapse();
     } catch (e) { console.error('加载本地基金失败', e); }
 })();

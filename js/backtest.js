@@ -4,8 +4,52 @@
  *          -> strategy -> report -> main
  */
 
+// 修正 Dietz 法（Modified Dietz）——XIRR 的一阶线性近似，纯除法无需迭代，必然可得结果。
+// 仅在 XIRR 迭代失败（无解/多解/发散）时作为降级兜底使用，返回年化收益率（小数，非百分比）。
+// 口径：期初价值为 0（本回测所有投入均以现金流形式给出），故
+//   收益 = Σcf 的相反数中的净盈亏；加权本金 = Σ(流出额 × 该笔资金在期内的剩余存续占比)。
+// 返回 NaN 表示连近似也无法计算（如加权本金为 0 或期间为 0）。
+function modifiedDietz(cashFlows, dates) {
+    if (!cashFlows || !dates || cashFlows.length !== dates.length || cashFlows.length < 2) return NaN;
+    const paired = cashFlows.map((cf, i) => ({ cf, date: dates[i] }));
+    paired.sort((a, b) => a.date - b.date);
+    const t0 = paired[0].date, tN = paired[paired.length - 1].date;
+    const totalDays = (tN - t0) / 86400000;
+    if (!(totalDays > 0)) return NaN;
+
+    // 净盈亏 = 全部现金流代数和（流入为正、流出为负；期末市值已作为正流包含在内）
+    let net = 0, weighted = 0;
+    for (const p of paired) {
+        net += p.cf;
+        if (p.cf < 0) {
+            // 该笔投入在期内的剩余存续时间占比
+            const w = 1 - ((p.date - t0) / 86400000) / totalDays;
+            weighted += (-p.cf) * w;
+        }
+    }
+    if (!(weighted > 0)) return NaN;
+
+    const periodReturn = net / weighted;          // 区间收益率
+    const years = totalDays / 365;
+    if (!(years > 0)) return NaN;
+    // 年化（几何折算）；区间亏损超过 100% 时无法开方，退回线性年化避免 NaN
+    const base = 1 + periodReturn;
+    const annual = base > 0 ? Math.pow(base, 1 / years) - 1 : periodReturn / years;
+    return isFinite(annual) ? annual : NaN;
+}
+
+// 记录最近一次 xirr() 调用是否走了降级近似（供 UI 标注「*近似」）。
+// 每次 xirr() 入口重置，调用方在拿到结果后立即读取即可。
+let xirrLastApprox = false;
+function xirrFallback(cashFlows, dates) {
+    const approx = modifiedDietz(cashFlows, dates);
+    xirrLastApprox = isFinite(approx);
+    return approx;
+}
+
 // XIRR
 function xirr(cashFlows, dates, guess = 0.1) {
+    xirrLastApprox = false;
     if (cashFlows.length !== dates.length || cashFlows.length < 2) return NaN;
     const paired = cashFlows.map((cf, i) => ({ cf, date: dates[i] }));
     paired.sort((a, b) => a.date - b.date);
@@ -29,14 +73,16 @@ function xirr(cashFlows, dates, guess = 0.1) {
             v += sortedFlows[j] / term;
             d -= sortedFlows[j] * f * Math.pow(1 + rate, f - 1);
         }
-        if (Math.abs(v) < tolerance) return rate;
+        if (Math.abs(v) < tolerance) return isFinite(rate) ? rate : xirrFallback(cashFlows, dates);
         if (Math.abs(d) < tolerance) break;
         rate -= v / d;
+        if (!isFinite(rate)) break;               // 迭代发散（NaN/Infinity）→ 转二分法
     }
     // 牛顿法失败（止盈等非传统现金流存在多次变号）→ 二分法在 [-0.9999, 100] 内求根
     let lo = -0.9999, hi = 100;
     let fLo = npv(lo), fHi = npv(hi);
-    if (fLo * fHi > 0) return NaN;
+    // 区间两端同号 → 方程在该区间内无根（无解或根在区间外）→ 降级为修正 Dietz 近似
+    if (fLo * fHi > 0) return xirrFallback(cashFlows, dates);
     for (let i = 0; i < 200; i++) {
         const mid = (lo + hi) / 2;
         const fMid = npv(mid);
@@ -44,7 +90,9 @@ function xirr(cashFlows, dates, guess = 0.1) {
         if (fLo * fMid < 0) { hi = mid; fHi = fMid; }
         else { lo = mid; fLo = fMid; }
     }
-    return (lo + hi) / 2;
+    // 200 次二分仍未达容差：区间已极窄，取中点即可；若异常非有限则降级近似
+    const mid = (lo + hi) / 2;
+    return isFinite(mid) ? mid : xirrFallback(cashFlows, dates);
 }
 
 // 通用指标计算：由对齐后的日期/资产/每日投入序列计算净值曲线与风险收益指标
@@ -55,6 +103,7 @@ function computeMetrics(validDates, validAssets, validInvest) {
     let netValues = [];
     let annualVolatility = NaN, sharpeRatio = NaN, calmarRatio = NaN, maxDrawdown = 0;
     let annualReturnPct = NaN, winRate = NaN, maxDDDuration = NaN;
+    let worstPeakIdx = 0, worstTroughIdx = 0;
 
     if (n >= MIN_TRADE_DAYS) {
         // 时间加权净值（TWR）：扣除当日新增投入后递推，加钱不会抬高净值
@@ -73,25 +122,25 @@ function computeMetrics(validDates, validAssets, validInvest) {
         const mean = dailyReturns.reduce((a,b)=>a+b,0)/dailyReturns.length;
         const variance = dailyReturns.reduce((a,b)=>a+Math.pow(b-mean,2),0)/dailyReturns.length;
         annualVolatility = Math.sqrt(variance) * Math.sqrt(252);
-        let peak = netValues[0];
-        for (const v of netValues) { if (v > peak) peak = v; const dd = (v - peak) / peak; if (dd < maxDrawdown) maxDrawdown = dd; }
+        let peak = netValues[0], peakIdx = 0;
+        for (let i = 0; i < netValues.length; i++) {
+            if (netValues[i] > peak) { peak = netValues[i]; peakIdx = i; }
+            const dd = (netValues[i] - peak) / peak;
+            if (dd < maxDrawdown) { maxDrawdown = dd; worstPeakIdx = peakIdx; worstTroughIdx = i; }
+        }
         maxDrawdown *= 100;
         if (annualVolatility > 0) sharpeRatio = (annualReturn - RISK_FREE_RATE) / annualVolatility;
         if (maxDrawdown !== 0) calmarRatio = annualReturn / Math.abs(maxDrawdown/100);
         annualReturnPct = annualReturn * 100;
         winRate = dailyReturns.length ? dailyReturns.filter(r => r > 0).length / dailyReturns.length * 100 : NaN;
-        let peakV = netValues[0], ddFrom = null, maxSpan = 0;
-        for (let i = 0; i < netValues.length; i++) {
-            if (netValues[i] > peakV) { peakV = netValues[i]; ddFrom = null; }
-            else if (netValues[i] < peakV) {
-                if (ddFrom === null) ddFrom = i;
-                const span = (validDates[i] - validDates[ddFrom]) / 86400000;
-                if (span > maxSpan) maxSpan = span;
-            }
-        }
-        maxDDDuration = maxSpan;
+        // 回撤持续天数 = 最大回撤区间（峰值→谷值）经历的自然日，与后续是否创新高无关
+        maxDDDuration = (validDates[worstTroughIdx] - validDates[worstPeakIdx]) / 86400000;
     }
-    return { netValues, annualVolatility, sharpeRatio, calmarRatio, maxDrawdown, annualReturnPct, winRate, maxDDDuration };
+    return { netValues, annualVolatility, sharpeRatio, calmarRatio, maxDrawdown, annualReturnPct, winRate, maxDDDuration,
+        maxDDPeak: maxDrawdown < 0 ? formatDate(validDates[worstPeakIdx]) : '',
+        maxDDTrough: maxDrawdown < 0 ? formatDate(validDates[worstTroughIdx]) : '',
+        ddDurPeak: maxDDDuration > 0 ? formatDate(validDates[worstPeakIdx]) : '',
+        ddDurTrough: maxDDDuration > 0 ? formatDate(validDates[worstTroughIdx]) : '' };
 }
 
 // ============ 基金数据持久化（IndexedDB，与基准一致） ============
@@ -154,12 +203,35 @@ async function clearAllFunds() {
 function refreshFundUI() {
     renderFundList();
     const has = Object.keys(fundsData).length > 0;
-    ['planListSection','resultSection'].forEach(id => {
-        const el = document.getElementById(id); if (el) el.style.display = has ? 'block' : 'none';
-    });
+    // resultSection 在点击“启动回测”前保持隐藏，运行成功后才显示
+    const planEl = document.getElementById('planListSection'); if (planEl) planEl.style.display = has ? 'block' : 'none';
     const hint = document.getElementById('fundStorageHint');
     if (hint) hint.textContent = has ? ('本地已存 ' + Object.keys(fundsData).length + ' 只') : '本地无数据';
+    updateDataMgmtCollapse();
 }
+// 数据管理折叠状态：基金与基准都有内容时默认折叠，缺一种时默认展开
+async function updateDataMgmtCollapse() {
+    const btn = document.getElementById('toggleDataMgmtBtn');
+    const collapsible = document.getElementById('dataMgmtCollapsible');
+    if (!btn || !collapsible) return;
+    if (btn.dataset.userToggled === '1') return; // 用户手动切换过则不再自动覆盖
+    let benchCount = 0;
+    try { benchCount = await db.benchmarks.count(); } catch (e) { console.error('查询基准数量失败', e); }
+    const hasFund = Object.keys(fundsData).length > 0;
+    const hasBench = benchCount > 0;
+    const collapsed = hasFund && hasBench;
+    collapsible.classList.toggle('hidden', collapsed);
+    btn.textContent = collapsed ? '▼ 展开' : '▲ 折叠';
+}
+// 用户手动切换数据管理折叠
+document.getElementById('toggleDataMgmtBtn')?.addEventListener('click', () => {
+    const btn = document.getElementById('toggleDataMgmtBtn');
+    const collapsible = document.getElementById('dataMgmtCollapsible');
+    if (!btn || !collapsible) return;
+    btn.dataset.userToggled = '1';
+    const collapsed = collapsible.classList.toggle('hidden');
+    btn.textContent = collapsed ? '▼ 展开' : '▲ 折叠';
+});
 function renderFundList() {
     const list = document.getElementById('fundList');
     if (!list) return;
@@ -249,15 +321,15 @@ function addPlan() {
         div: 'reinvest',
         weekday: 1,
         dayOfMonth: 'first',
+        mdDays: 120,
+        mdPct: 10,
+        mdContinuous: false,   // 最大回撤连续投资：开启后窗口持续计算，满足回撤阈值即每交易日投一笔，不满足即停
         stopGain: false,
         stopGainPct: 8,
         stopGainSellRatio: 100
     };
-    const existingIndex = investmentPlans.findIndex(p => p.fund === fund);
-    if (existingIndex !== -1) {
-        if (!confirm(`基金 ${fund} 已有计划，是否覆盖？`)) return;
-        investmentPlans[existingIndex] = plan;
-    } else investmentPlans.push(plan);
+    // 同一基金允许多条计划并存（如不同策略/金额），直接新增，不做覆盖
+    investmentPlans.push(plan);
     renderPlanList();
     checkNavGaps();
 }
@@ -313,6 +385,8 @@ function checkNavGaps() {
     const gapMsg = useBenchmark
         ? `⚠ 检测到以下基金相对基准指数存在空白净值：${names}。缺失日将按前一交易日净值模拟填充。`
         : `⚠ 检测到以下基金相对于其它基金存在空白净值：${names}。缺失日将按前一交易日净值模拟填充。`;
+    // 发现净值不完整时自动勾选「填充空白净值」，确保缺失日默认按前一交易日净值模拟填充
+    fillMissingNav = true;
     hint.classList.remove('hidden');
     hint.innerHTML = warnHtml + `${gapMsg}
         <label class="ml-2 inline-flex items-center gap-1 text-sm font-medium text-amber-700 cursor-pointer">
@@ -333,7 +407,8 @@ function planCardHtml(p) {
         <option value="single" ${p.type === 'single' ? 'selected' : ''}>单笔</option>
         <option value="weekly" ${p.type === 'weekly' ? 'selected' : ''}>每周定投</option>
         <option value="biweekly" ${p.type === 'biweekly' ? 'selected' : ''}>每双周定投</option>
-        <option value="monthly" ${p.type === 'monthly' ? 'selected' : ''}>每月定投</option>`;
+        <option value="monthly" ${p.type === 'monthly' ? 'selected' : ''}>每月定投</option>
+        <option value="maxDrawdown" ${p.type === 'maxDrawdown' ? 'selected' : ''}>最大回撤投资</option>`;
     const wdOpts = [1,2,3,4,5].map(d => `<option value="${d}" ${String(p.weekday) === String(d) ? 'selected' : ''}>${wdNames[d]}</option>`).join('');
     const domOpts = ['first','1','2','3','4','5','6','7','8','9','10','11','12','13','14','15','16','17','18','19','20','21','22','23','24','25','26','27','28'].map(d => {
         const t = d === 'first' ? '每月首个交易日' : (d + ' 号');
@@ -344,6 +419,7 @@ function planCardHtml(p) {
     const isSingle = p.type === 'single';
     const showWeekday = p.type === 'weekly' || p.type === 'biweekly';
     const showDom = p.type === 'monthly';
+    const showMd = p.type === 'maxDrawdown';
     const disCls = 'disabled:bg-gray-100 disabled:text-gray-400 disabled:cursor-not-allowed';
     const daySlot = showWeekday
         ? `<label class="block text-xs text-gray-600 mb-1">定投星期</label>
@@ -371,7 +447,14 @@ function planCardHtml(p) {
         ${stopGainPctDiv}
         ${stopGainSellDiv}
       </div>
-      <div class="mt-2 text-right"><button data-act="del" class="text-red-500 hover:text-red-700 text-sm font-medium">删除此计划</button></div>
+      ${showMd ? `
+      <div class="grid grid-cols-1 md:grid-cols-6 gap-3 items-start mt-3">
+        <div class="md:col-span-1"><label class="block text-xs text-gray-600 mb-1">回撤窗口天数</label><input type="number" data-field="mdDays" value="${p.mdDays}" min="5" step="1" class="w-full p-2 border rounded-lg text-sm"></div>
+        <div class="md:col-span-1"><label class="block text-xs text-gray-600 mb-1">回撤阈值(%)</label><input type="number" data-field="mdPct" value="${p.mdPct}" min="1" step="0.5" class="w-full p-2 border rounded-lg text-sm"></div>
+        <div class="md:col-span-2 flex items-end"><label class="flex items-center gap-2 text-xs font-medium text-gray-700 cursor-pointer h-9"><input type="checkbox" data-field="mdContinuous" ${p.mdContinuous ? 'checked' : ''} class="w-4 h-4"> 连续投资（逢跌每日加仓至回升）</label></div>
+        <div class="md:col-span-2 text-[10px] text-gray-400 self-center">${p.mdContinuous ? '窗口持续计算：回撤达阈值即每个交易日投一笔，回撤收窄至阈值以下即停止，可反复触发。' : '监测窗口内，从近 N 日最高净值回撤达阈值时投入一笔金额；创阶段新高后重新计算窗口可再触发。'}</div>
+      </div>` : ''}
+      <div class="mt-2 text-left"><button data-act="del" class="text-red-500 hover:text-red-700 text-sm font-medium">删除此计划</button></div>
     </div>`;
 }
 
@@ -421,6 +504,10 @@ function runBacktest() {
     let totalCashDiv = 0;    // 纯现金分红累计（不含止盈赎回）
     const dailyAsset = [], dailyDates = [], dailyInvest = [], dailyCashDiv = [], dailyTotalCash = [];
     const cashFlows = [], flowDates = [];
+    // 可用最大资金池（全局共享，跨基金）：留空/0/NaN = 不限制
+    const _comboPoolEl = document.getElementById('comboPool');
+    const _comboRaw = _comboPoolEl ? parseFloat(_comboPoolEl.value) : NaN;
+    const comboPoolCap = (isFinite(_comboRaw) && _comboRaw > 0) ? _comboRaw : Infinity;
 
     const allDatesSet = new Set();
     Object.values(fundsData).forEach(f => f.dates.forEach(d => allDatesSet.add(formatDate(d))));
@@ -486,6 +573,8 @@ function runBacktest() {
     const fundMaxPrincipal = {}; Object.keys(fundsData).forEach(code => fundMaxPrincipal[code] = 0);
     const fundRedeemed = {}; Object.keys(fundsData).forEach(code => fundRedeemed[code] = 0);
     const fundStopGainEvents = {}; Object.keys(fundsData).forEach(code => fundStopGainEvents[code] = []);
+    let poolBalance = comboPoolCap;   // 共享资金池当前可用余额：买入扣减、赎回回充
+    let minPoolBalance = comboPoolCap;   // 运行期最低余额，用于换算峰值占用
 
     // 预计算 biweekly 计划的每双周投资日期集合（每两个该 weekday 交易日投一次）
     const biweeklySet = new Set();
@@ -508,6 +597,9 @@ function runBacktest() {
             }
         }
     }
+
+    // 每计划净值滑动窗口历史（最大回撤投资用，跨日期持久）
+    const planNavHist = {};
 
     for (let dtIdx = 0; dtIdx < allDates.length; dtIdx++) {
         const currentDt = allDates[dtIdx];
@@ -548,6 +640,7 @@ function runBacktest() {
                     cashFlows.push(proceeds); flowDates.push(new Date(currentDt));
                     fundCostBasis[fund] *= (1 - sellRatio);
                     fundRedeemed[fund] += proceeds;
+                    poolBalance += proceeds;   // 赎回回充资金池，可再投
                     fundStopGainEvents[fund].push({ dateStr, proceeds, ratio: sellRatio, nav });
                     if (sellRatio >= 1 || fundShares[fund] < 1e-9) {
                         fundRunPrincipal[fund] = 0;
@@ -590,8 +683,26 @@ function runBacktest() {
                         if (parseInt(currentDateStr.split('-')[2]) === dom) shouldInvest = true;
                     }
                 }
+            } else if (plan.type === 'maxDrawdown') {
+                if (currentDateStr >= plan.startDate && currentDateStr <= plan.endDate) {
+                    const mdDays = Math.max(5, parseInt(plan.mdDays, 10) || 120);
+                    const mdPctTh = (parseFloat(plan.mdPct) || 10) / 100;
+                    const hist = (planNavHist[plan.id] = planNavHist[plan.id] || []);
+                    hist.push(nav);
+                    if (hist.length > mdDays) hist.shift();
+                    let high = hist[0];
+                    for (let w = 1; w < hist.length; w++) if (hist[w] > high) high = hist[w];
+                    const hit = high > 0 && (high - nav) / high >= mdPctTh;
+                    if (plan.mdContinuous) {
+                        // 连续投资：窗口持续滚动计算，满足回撤阈值即每交易日投一笔；不满足即不投（不再重置窗口，可反复触发）
+                        if (hit) shouldInvest = true;
+                    } else if (hit) {
+                        shouldInvest = true;
+                        hist.length = 0;   // 单笔模式：重置窗口，创阶段新高后重新计算可再触发
+                    }
+                }
             }
-            if (shouldInvest) {
+            if (shouldInvest && poolBalance >= amt) {
                 fundShares[fund] += amt / nav;
                 fundRunPrincipal[fund] += amt;
                 fundCostBasis[fund] += amt;
@@ -600,6 +711,8 @@ function runBacktest() {
                 dailyInv += amt;
                 cashFlows.push(-amt);
                 flowDates.push(new Date(currentDt));
+                poolBalance -= amt;
+                if (poolBalance < minPoolBalance) minPoolBalance = poolBalance;   // 更新运行期最低余额
             }
         }
         let mv = 0;
@@ -646,6 +759,8 @@ function runBacktest() {
     const combined = flowDates.map((d, i) => ({ date: d, cf: cashFlows[i] }));
     combined.sort((a, b) => a.date - b.date);
     const xirrVal = xirr(combined.map(c=>c.cf), combined.map(c=>c.date)) * 100;
+    // XIRR 迭代失败时已降级为修正 Dietz 近似，标注以示区分
+    const xirrIsApprox = xirrLastApprox;
 
     // 净值序列起点：最早的计划起始日（earliestInvestDate）。TWR 公式在昨日资产为 0 时自动置 1.0，前导空仓不会压平曲线
     const startIdx = dailyDates.findIndex(d => d >= earliestInvestDate);
@@ -660,7 +775,8 @@ function runBacktest() {
     let annualReturnPct = _m.annualReturnPct, winRate = _m.winRate, maxDDDuration = _m.maxDDDuration, netValues = _m.netValues;
     backtestResult = { dates: validDates, assets: validAssets, netValues, invests: validInvest, cashDivs: validCashDivs, totalCashSeries: validTotalCash,
         simDateStrs: allDateStrs, simNav: simNav, simDiv: simDiv, simDow: simDow, simDateTs: simDateTs, simDayOfMonth: simDayOfMonth, simStartIdx: startIdx,
-        stopGainByFund, stopGainEvents, totalMaxPrincipal, totalRedeemedAll, maxPrincipalReturn, hasStopGainPlan };
+        stopGainByFund, stopGainEvents, totalMaxPrincipal, totalRedeemedAll, maxPrincipalReturn, hasStopGainPlan,
+        maxDDPeak: _m.maxDDPeak, maxDDTrough: _m.maxDDTrough, ddDurPeak: _m.ddDurPeak, ddDurTrough: _m.ddDurTrough };
 
     const twrHtml = isNaN(annualReturnPct) ? '-' : annualReturnPct.toFixed(2) + '%';
     const winHtml = isNaN(winRate) ? '-' : winRate.toFixed(1) + '%';
@@ -680,15 +796,28 @@ function runBacktest() {
         <div class="bg-blue-50 p-4 rounded-lg text-center" data-mkey="总资产"><div class="text-sm text-slate-500">总资产</div><div class="text-2xl font-bold text-blue-700">${totalAsset.toFixed(2)} 元</div></div>
         <div class="bg-amber-50 p-4 rounded-lg text-center" data-mkey="峰值本金"><div class="text-sm text-slate-500">峰值本金</div><div class="text-2xl font-bold text-amber-700">${peakPrincipalVal.toFixed(2)} 元</div></div>
 
-        <div class="bg-emerald-50 p-4 rounded-lg text-center" data-mkey="累计收益率"><div class="text-sm text-slate-500">累计收益率</div><div class="text-2xl font-bold text-emerald-800">${totalReturn.toFixed(2)}%</div></div>
-        <div class="bg-emerald-50 p-4 rounded-lg text-center" data-mkey="XIRR年化"><div class="text-sm text-slate-500">XIRR年化</div><div class="text-2xl font-bold text-emerald-800">${isNaN(xirrVal)?'-':xirrVal.toFixed(2)+'%'}</div></div>
-        <div class="bg-emerald-50 p-4 rounded-lg text-center" data-mkey="年化收益率(时间加权)"><div class="text-sm text-slate-500">年化收益率(时间加权)</div><div class="text-2xl font-bold text-emerald-800">${twrHtml}</div></div>
+        <div class="bg-emerald-50 p-4 rounded-lg text-center" data-mkey="累计收益率(资金加权)"><div class="text-sm text-slate-500">累计收益率(资金加权)</div><div class="text-2xl font-bold text-emerald-800">${totalReturn.toFixed(2)}%</div></div>
+        <div class="bg-[rgba(16,185,129,0.12)] p-4 rounded-lg text-center" data-mkey="XIRR年化(资金加权)"><div class="text-sm text-slate-500">XIRR年化(资金加权)${xirrIsApprox?'<span class="text-amber-600" title="XIRR 迭代未收敛（现金流多次变号或无解），已降级为修正 Dietz 近似值">*近似</span>':''}</div><div class="text-2xl font-bold text-emerald-800">${isNaN(xirrVal)?'-':xirrVal.toFixed(2)+'%'}</div></div>
+        <div class="bg-emerald-50 p-4 rounded-lg text-center" data-mkey="年化收益率(时间加权净值)"><div class="text-sm text-slate-500">年化收益率(时间加权净值)</div><div class="text-2xl font-bold text-emerald-800">${twrHtml}</div></div>
         <div class="bg-emerald-50 p-4 rounded-lg text-center" data-mkey="胜率(正收益日占比)"><div class="text-sm text-slate-500">胜率(正收益日占比)</div><div class="text-2xl font-bold text-emerald-800">${winHtml}</div></div>
         <div class="bg-amber-50 p-4 rounded-lg text-center cursor-help" data-mkey="赎回金额"><div class="text-sm text-slate-500">赎回金额</div><div class="text-2xl font-bold text-amber-700">${totalRedeemedAll.toFixed(2)} 元</div></div>
 
         ${riskHtml}
         <div class="bg-amber-50 p-4 rounded-lg text-center cursor-help" data-mkey="峰值本金收益率"><div class="text-sm text-slate-500">峰值本金收益率</div><div class="text-2xl font-bold text-amber-700">${peakReturnVal.toFixed(2)}%</div></div>
     `;
+    // 资金池剩余/上限：显示在「可用最大资金池(元)」输入框左侧
+    const comboPoolStatEl = document.getElementById('comboPoolStat');
+    if (comboPoolStatEl) {
+        if (isFinite(comboPoolCap)) {
+            const comboUsed = comboPoolCap - minPoolBalance;
+            comboPoolStatEl.textContent = `资金池峰值占用 / 上限：${comboUsed.toFixed(0)} / ${comboPoolCap.toFixed(0)} 元`;
+            comboPoolStatEl.title = '所有投资共享此资金池；峰值占用 = 上限 − 运行过程中的最低余额，反映这笔资金被同时占用的最高水位';
+            comboPoolStatEl.classList.remove('hidden');
+        } else {
+            comboPoolStatEl.textContent = '';
+            comboPoolStatEl.classList.add('hidden');
+        }
+    }
     // 止盈浮窗：赎回金额卡显示「止盈明细」；峰值本金收益率卡显示「止盈次数 + 间隔统计」
     const tipEl = document.getElementById('stopGainTip');
     const bindStopGainTip = (mkey, builder) => {
@@ -720,6 +849,8 @@ function runBacktest() {
     renderAnalysisTable(); // 确保调用的是异步函数
     renderProfitProbability();
     renderCorrelationMatrix();
+    // 回测成功后显示结果板块（点击启动回测前保持隐藏）
+    const rs = document.getElementById('resultSection'); if (rs) rs.style.display = 'block';
 }
 
 // 构建止盈浮窗内容（按单基金列出止盈触发明细）
