@@ -5,32 +5,46 @@
  */
 
 // 工具函数：格式化日期为 yyyy-mm-dd
-function formatDate(date) {
-    const year = date.getFullYear();
-    const month = String(date.getMonth() + 1).padStart(2, '0');
-    const day = String(date.getDate()).padStart(2, '0');
-    return `${year}-${month}-${day}`;
-}
+        function formatDate(date) {
+            const year = date.getFullYear();
+            const month = String(date.getMonth() + 1).padStart(2, '0');
+            const day = String(date.getDate()).padStart(2, '0');
+            return `${year}-${month}-${day}`;
+        }
 
-// 增强的日期解析：支持 yyyy-mm-dd 和 yyyy/m/d 格式（月日可带或不带前导零）
+// 三段日期解析：'-' 与 '/' 分隔共用，四位年份优先(yyyy-mm-dd / yyyy/m/d)，
+// 否则按两位年份短日期(mm-dd-yy / m/d/yy)回退，含越界回填校验。
+// 失败返回 Invalid Date。注意：本函数只处理"文本字符串"，绝不按 Excel 显示
+// 格式(number_format)反推——显示格式与存储值无关，按格式猜解析是已被证伪的
+// 方向（曾导致 mm-dd-yy 被吐成 '01-04-05' 误判为 1901 年）。
 function parseDateString(str) {
     if (!str || typeof str !== 'string') return new Date(NaN);
     str = str.trim();
-    // 尝试 '-' 分隔
-    let parts = str.split('-');
-    if (parts.length === 3) {
-        let year = parseInt(parts[0]), month = parseInt(parts[1])-1, day = parseInt(parts[2]);
-        if (!isNaN(year) && !isNaN(month) && !isNaN(day) && month >= 0 && month <= 11 && day >= 1 && day <= 31) {
-            return new Date(year, month, day);
+    const seps = ['-', '/'];
+    for (const sep of seps) {
+        const parts = str.split(sep);
+        if (parts.length !== 3) continue;
+        const nums = parts.map(p => parseInt(p, 10));
+        if (nums.some(n => isNaN(n))) continue;
+        let y, m, d;
+        if (parts[0].length === 4) {
+            // 四位年份优先：yyyy-mm-dd / yyyy/m/d
+            [y, m, d] = [nums[0], nums[1], nums[2]];
+        } else if (parts[2].length === 2 || parts[2].length === 4) {
+            // 两位年份短日期：mm-dd-yy / m/d/yy（末段为年）
+            // 歧义消解：首段 > 12 则判定为 dd-mm-yy（英式），否则默认 mm-dd-yy（美式，与 Excel 短日期默认一致）
+            if (nums[0] > 12) { [d, m, y] = [nums[0], nums[1], nums[2]]; }
+            else { [m, d, y] = [nums[0], nums[1], nums[2]]; }
+            // 两位年份按世纪补全：yy < 50 -> 20yy，否则 19yy
+            if (y < 100) y += (y < 50 ? 2000 : 1900);
+        } else {
+            continue;
         }
-    }
-    // 尝试 '/' 分隔
-    parts = str.split('/');
-    if (parts.length === 3) {
-        let year = parseInt(parts[0]), month = parseInt(parts[1])-1, day = parseInt(parts[2]);
-        if (!isNaN(year) && !isNaN(month) && !isNaN(day) && month >= 0 && month <= 11 && day >= 1 && day <= 31) {
-            return new Date(year, month, day);
-        }
+        const dt = new Date(y, m - 1, d);
+        if (isNaN(dt.getTime())) continue;
+        // 回填校验：拒绝越界值（如 2026-02-31 被 JS 静默滚动成 3-03）
+        if (dt.getFullYear() !== y || dt.getMonth() !== m - 1 || dt.getDate() !== d) continue;
+        return dt;
     }
     return new Date(NaN);
 }
@@ -45,7 +59,16 @@ function excelSerialToDate(serial) {
 // 增强解析：Date对象 / 数字序列号 / yyyy-mm-dd / yyyy/m/d / yyyy年m月d日 / yyyymmdd / 纯数字
 function parseDateFlexible(raw) {
     if (raw == null) return null;
-    if (raw instanceof Date) return raw;
+    // SheetJS(cellDates:true) 给出的 Date，其"本地时间分量"对应单元格字面日期，
+    // 但可能带毫秒级负偏移（如 23:59:59.999 导致差一天），故先就近取整到整天再读分量
+    if (raw instanceof Date) {
+        if (isNaN(raw.getTime())) return null;
+        const d = new Date(Math.round(raw.getTime() / 86400000) * 86400000);
+        return new Date(d.getUTCFullYear(), d.getUTCMonth(), d.getUTCDate());
+    }
+    // 注意：raw:true 已让真日期单元格产出 Date，切勿改用 raw:false/dateNF 按显示格式
+    // (number_format) 反推解析——显示格式与存储值无关，mm-dd-yy 会被吐成 '01-04-05'
+    // 误判为 1901 年，这是已被证伪的方向。
     if (typeof raw === 'number') return excelSerialToDate(raw);
     if (typeof raw !== 'string') return null;
     const s = raw.trim();

@@ -267,7 +267,7 @@ document.getElementById('fileInput').addEventListener('change', function(e) {
             for (let i = 1; i < json.length; i++) {
                 if (json[i][0] && json[i][1] !== undefined) {
                     const date = parseDateFlexible(json[i][0]);
-                    if (!isNaN(date.getTime())) {
+                    if (date && !isNaN(date.getTime())) {
                         dates.push(date);
                         nav.push(parseFloat(json[i][1]));
                         div.push(parseFloat(json[i][2]) || 0);
@@ -323,6 +323,7 @@ function addPlan() {
         dayOfMonth: 'first',
         mdDays: 120,
         mdPct: 10,
+        mdBench: 'self',       // 最大回撤回撤基准：self=基金自身净值（默认） / portfolio=组合净值 / bench:<id>=导入基准
         mdContinuous: false,   // 最大回撤连续投资：开启后窗口持续计算，满足回撤阈值即每交易日投一笔，不满足即停
         stopGain: false,
         stopGainPct: 8,
@@ -400,6 +401,14 @@ function fundCodeName(key) {
     return { code: String(key), name: String(key) };
 }
 
+// 回撤基准下拉选项 HTML（复用 benchmarks.js 的 getBenchmarkOptions）
+function mdBenchOptions(selected) {
+    const sel = selected || 'self';
+    return getBenchmarkOptions().map(o =>
+        `<option value="${o.value}" ${String(o.value) === String(sel) ? 'selected' : ''}>${o.label}</option>`
+    ).join('');
+}
+
 // 单张计划卡片（内联可编辑，data-field 写回 investmentPlans 对应对象）
 function planCardHtml(p) {
     const fundOpts = Object.keys(fundsData).map(k => `<option value="${k}" ${k === p.fund ? 'selected' : ''}>${k}</option>`).join('');
@@ -451,8 +460,9 @@ function planCardHtml(p) {
       <div class="grid grid-cols-1 md:grid-cols-6 gap-3 items-start mt-3">
         <div class="md:col-span-1"><label class="block text-xs text-gray-600 mb-1">回撤窗口天数</label><input type="number" data-field="mdDays" value="${p.mdDays}" min="5" step="1" class="w-full p-2 border rounded-lg text-sm"></div>
         <div class="md:col-span-1"><label class="block text-xs text-gray-600 mb-1">回撤阈值(%)</label><input type="number" data-field="mdPct" value="${p.mdPct}" min="1" step="0.5" class="w-full p-2 border rounded-lg text-sm"></div>
+        <div class="md:col-span-2"><label class="block text-xs text-gray-600 mb-1">回撤基准</label><select data-field="mdBench" class="w-full p-2 border rounded-lg text-sm">${mdBenchOptions(p.mdBench)}</select></div>
         <div class="md:col-span-2 flex items-end"><label class="flex items-center gap-2 text-xs font-medium text-gray-700 cursor-pointer h-9"><input type="checkbox" data-field="mdContinuous" ${p.mdContinuous ? 'checked' : ''} class="w-4 h-4"> 连续投资（逢跌每日加仓至回升）</label></div>
-        <div class="md:col-span-2 text-[10px] text-gray-400 self-center">${p.mdContinuous ? '窗口持续计算：回撤达阈值即每个交易日投一笔，回撤收窄至阈值以下即停止，可反复触发。' : '监测窗口内，从近 N 日最高净值回撤达阈值时投入一笔金额；创阶段新高后重新计算窗口可再触发。'}</div>
+        <div class="md:col-span-6 text-[10px] text-gray-400">${p.mdContinuous ? '窗口持续计算：回撤达阈值即每个交易日投一笔，回撤收窄至阈值以下即停止，可反复触发。' : '监测窗口内，从近 N 日最高净值回撤达阈值时投入一笔金额；创阶段新高后重新计算窗口可再触发。'}回撤基准默认用基金自身净值；选「组合净值」按整体组合表现；选导入基准按该指数回撤判定。</div>
       </div>` : ''}
       <div class="mt-2 text-left"><button data-act="del" class="text-red-500 hover:text-red-700 text-sm font-medium">删除此计划</button></div>
     </div>`;
@@ -499,10 +509,10 @@ function renderPlanList() {
 // 核心回测（保持不变）
 function runBacktest() {
     if (investmentPlans.length === 0) { alert('请先添加投资计划！'); return; }
-    const fundShares = {}; Object.keys(fundsData).forEach(code => fundShares[code] = 0);
+    const planShares = {}; investmentPlans.forEach(p => planShares[p.id] = 0);
     let totalCash = 0;       // 总现金（真实分红 + 止盈赎回到账）
     let totalCashDiv = 0;    // 纯现金分红累计（不含止盈赎回）
-    const dailyAsset = [], dailyDates = [], dailyInvest = [], dailyCashDiv = [], dailyTotalCash = [];
+    const dailyAsset = [], dailyDates = [], dailyInvest = [], dailyCashDiv = [], dailyTotalCash = [], dailyHoldAsset = [];
     const cashFlows = [], flowDates = [];
     // 可用最大资金池（全局共享，跨基金）：留空/0/NaN = 不限制
     const _comboPoolEl = document.getElementById('comboPool');
@@ -515,7 +525,11 @@ function runBacktest() {
     if (benchmarkDateStrs.length > 0) benchmarkDateStrs.forEach(d => allDatesSet.add(d));
     const allDateStrs = Array.from(allDatesSet).sort();
     const allDates = allDateStrs.map(str => new Date(str + 'T00:00:00'));
-    const earliestInvestDate = new Date(Math.min(...investmentPlans.map(p => new Date(p.startDate).getTime())));
+    // earliestInvestDate 必须按"本地零点"解析，与 allDates/dailyDates（均为
+    // `new Date(str + 'T00:00:00')` 本地零点）同一基准。若用 new Date(p.startDate)
+    // 按 UTC 零点解析，会与本地零点相差 8 小时，使下方 startIdx 用 epoch 比较时
+    // 跳过首笔定投日当天，把首笔投入从 invests 切掉——累计净收益会漏算首笔本金。
+    const earliestInvestDate = new Date(Math.min(...investmentPlans.map(p => new Date(p.startDate + 'T00:00:00').getTime())));
 
     // 为每个基金构建前向填充净值表：参照并集日期，成立后缺失日用最近一次已知净值填充
     const fundNavMap = {};
@@ -566,13 +580,15 @@ function runBacktest() {
     }
     const doFill = fillMissingNav;
 
-    // 每基金止盈/本金状态（按单基金独立触发目标止盈）
-    const fundRunPrincipal = {}; Object.keys(fundsData).forEach(code => fundRunPrincipal[code] = 0);
-    const fundRunMaxPrincipal = {}; Object.keys(fundsData).forEach(code => fundRunMaxPrincipal[code] = 0);
-    const fundCostBasis = {}; Object.keys(fundsData).forEach(code => fundCostBasis[code] = 0);
-    const fundMaxPrincipal = {}; Object.keys(fundsData).forEach(code => fundMaxPrincipal[code] = 0);
-    const fundRedeemed = {}; Object.keys(fundsData).forEach(code => fundRedeemed[code] = 0);
-    const fundStopGainEvents = {}; Object.keys(fundsData).forEach(code => fundStopGainEvents[code] = []);
+    // 每计划止盈/本金状态（按 plan 独立追踪，同一基金的多计划互不影响）
+    const planRunPrincipal = {}; investmentPlans.forEach(p => planRunPrincipal[p.id] = 0);
+    const planRunMaxPrincipal = {}; investmentPlans.forEach(p => planRunMaxPrincipal[p.id] = 0);
+    const planCostBasis = {}; investmentPlans.forEach(p => planCostBasis[p.id] = 0);
+    const planMaxPrincipal = {}; investmentPlans.forEach(p => planMaxPrincipal[p.id] = 0);
+    const planRedeemed = {}; investmentPlans.forEach(p => planRedeemed[p.id] = 0);
+    const planStopGainEvents = {}; investmentPlans.forEach(p => planStopGainEvents[p.id] = []);
+    const planMdEvents = {}; investmentPlans.forEach(p => planMdEvents[p.id] = []);   // 最大回撤投资触发加仓事件
+    const planInvestEvents = {}; investmentPlans.forEach(p => planInvestEvents[p.id] = []);   // 普通定投/单笔投资触发事件
     let poolBalance = comboPoolCap;   // 共享资金池当前可用余额：买入扣减、赎回回充
     let minPoolBalance = comboPoolCap;   // 运行期最低余额，用于换算峰值占用
 
@@ -600,6 +616,13 @@ function runBacktest() {
 
     // 每计划净值滑动窗口历史（最大回撤投资用，跨日期持久）
     const planNavHist = {};
+    // 每计划本次下跌记录的最大回撤比例（连续投资"创最深才买"用，跨日期持久）
+    const planMaxDD = {};
+    // 组合净值序列（每日末尾的 mv+totalCash），供 maxDrawdown 选「组合净值」基准时使用；
+    // 判定点位于当日投资分支（早于当日组合市值计算），故用截至昨日的组合净值入窗。
+    const comboNavHist = [];
+    // 导入基准净值映射缓存（按基准 id），maxDrawdown 选 bench:<id> 时懒加载一次
+    const benchNavMaps = {};
 
     for (let dtIdx = 0; dtIdx < allDates.length; dtIdx++) {
         const currentDt = allDates[dtIdx];
@@ -612,39 +635,39 @@ function runBacktest() {
             if (fundDateIdx === -1) continue;
             const divPerShare = fundData.div[fundDateIdx];
             const nav = fundData.nav[fundDateIdx];
-            if (fundShares[fund] > 0 && divPerShare > 0) {
-                const totalDiv = fundShares[fund] * divPerShare;
-                if (plan.div === 'reinvest') fundShares[fund] += totalDiv / nav;
+            if (planShares[plan.id] > 0 && divPerShare > 0) {
+                const totalDiv = planShares[plan.id] * divPerShare;
+                if (plan.div === 'reinvest') planShares[plan.id] += totalDiv / nav;
                 else { totalCash += totalDiv; totalCashDiv += totalDiv; cashFlows.push(totalDiv); flowDates.push(new Date(currentDt)); }
             }
         }
-        // 目标止盈检查（按单基金，在投资前、以截至昨日的本轮峰值本金为分母）
+        // 目标止盈检查（按 plan 独立，在投资前、以截至昨日的本轮峰值本金为分母）
         for (const plan of investmentPlans) {
             if (!plan.stopGain) continue;
             const fund = plan.fund;
-            if (fundShares[fund] <= 0) continue;
+            if (planShares[plan.id] <= 0) continue;
             const fundData = fundsData[fund];
             let nav;
             if (doFill) { nav = fundNavMap[fund].get(dateStr); if (nav === undefined) continue; }
             else { const idx = fundData.dates.findIndex(d => formatDate(d) === dateStr); if (idx === -1) continue; nav = fundData.nav[idx]; }
             const th = (parseFloat(plan.stopGainPct) || 0) / 100;
             const sellRatio = Math.min(1, Math.max(0, (parseFloat(plan.stopGainSellRatio) || 0) / 100));
-            const roundPrincipal = fundRunMaxPrincipal[fund];
+            const roundPrincipal = planRunMaxPrincipal[plan.id];
             if (roundPrincipal > 0 && sellRatio > 0) {
-                const holdMv = fundShares[fund] * nav;
-                if ((holdMv - fundCostBasis[fund]) / roundPrincipal >= th) {
-                    const sellShares = fundShares[fund] * sellRatio;
+                const holdMv = planShares[plan.id] * nav;
+                if ((holdMv - planCostBasis[plan.id]) / roundPrincipal >= th) {
+                    const sellShares = Math.min(planShares[plan.id], planShares[plan.id] * sellRatio);
                     const proceeds = sellShares * nav;
-                    fundShares[fund] -= sellShares;
+                    planShares[plan.id] -= sellShares;
                     totalCash += proceeds;
                     cashFlows.push(proceeds); flowDates.push(new Date(currentDt));
-                    fundCostBasis[fund] *= (1 - sellRatio);
-                    fundRedeemed[fund] += proceeds;
+                    planCostBasis[plan.id] *= (1 - sellRatio);
+                    planRedeemed[plan.id] += proceeds;
                     poolBalance += proceeds;   // 赎回回充资金池，可再投
-                    fundStopGainEvents[fund].push({ dateStr, proceeds, ratio: sellRatio, nav });
-                    if (sellRatio >= 1 || fundShares[fund] < 1e-9) {
-                        fundRunPrincipal[fund] = 0;
-                        fundRunMaxPrincipal[fund] = 0;
+                    planStopGainEvents[plan.id].push({ dateStr, proceeds, ratio: sellRatio, nav });
+                    if (sellRatio >= 1 || planShares[plan.id] < 1e-9) {
+                        planRunPrincipal[plan.id] = 0;
+                        planRunMaxPrincipal[plan.id] = 0;
                     }
                 }
             }
@@ -685,45 +708,86 @@ function runBacktest() {
                 }
             } else if (plan.type === 'maxDrawdown') {
                 if (currentDateStr >= plan.startDate && currentDateStr <= plan.endDate) {
-                    const mdDays = Math.max(5, parseInt(plan.mdDays, 10) || 120);
-                    const mdPctTh = (parseFloat(plan.mdPct) || 10) / 100;
-                    const hist = (planNavHist[plan.id] = planNavHist[plan.id] || []);
-                    hist.push(nav);
-                    if (hist.length > mdDays) hist.shift();
-                    let high = hist[0];
-                    for (let w = 1; w < hist.length; w++) if (hist[w] > high) high = hist[w];
-                    const hit = high > 0 && (high - nav) / high >= mdPctTh;
-                    if (plan.mdContinuous) {
-                        // 连续投资：窗口持续滚动计算，满足回撤阈值即每交易日投一笔；不满足即不投（不再重置窗口，可反复触发）
-                        if (hit) shouldInvest = true;
-                    } else if (hit) {
-                        shouldInvest = true;
-                        hist.length = 0;   // 单笔模式：重置窗口，创阶段新高后重新计算可再触发
+                    // 统一口径（与策略对比一致）：回撤窗口仅在该基金真实交易日推进与判定。
+                    // 基金不交易（仅并集日历/基准有值）的日子不推窗、不判定，避免窗口密度差异导致首笔触发不一致；
+                    // 并额外跳过周末（周六/周日）——基金数据里季末/年末可能出现与前日一致的周末净值点，
+                    // 若据此推窗会在非交易日误触发回撤买入，故与策略对比一致排除。
+                    const mdRealTradingIdx = fundData.dates.findIndex(d => formatDate(d) === currentDateStr);
+                    const mdDow = mdRealTradingIdx !== -1 ? fundData.dates[mdRealTradingIdx].getUTCDay() : -1;
+                    if (mdRealTradingIdx !== -1 && mdDow !== 6 && mdDow !== 0) {
+                        const mdDays = Math.max(5, parseInt(plan.mdDays, 10) || 120);
+                        const mdPctTh = (parseFloat(plan.mdPct) || 10) / 100;
+                        // 回撤基准序列当日值：self=基金自身净值；portfolio=昨日组合净值；bench:<id>=导入基准净值
+                        let mdVal;
+                        const mb = plan.mdBench || 'self';
+                        if (mb === 'portfolio') {
+                            mdVal = comboNavHist.length ? comboNavHist[comboNavHist.length - 1] : null;
+                        } else if (mb && mb.indexOf('bench:') === 0) {
+                            const bid = parseInt(mb.slice(6), 10);
+                            if (!benchNavMaps[bid]) benchNavMaps[bid] = getBenchmarkNavMap(bid);
+                            const m = benchNavMaps[bid];
+                            mdVal = m ? (m.get(currentDateStr) ?? null) : null;
+                        } else {
+                            mdVal = nav;   // self：基金自身净值（现状）
+                        }
+                        const hist = (planNavHist[plan.id] = planNavHist[plan.id] || []);
+                        let dd = 0;   // 当日回撤比例（窗口高点 - 当日值）/ 窗口高点
+                        if (mdVal != null && mdVal > 0) {   // 基准当日不可得或无效时跳过推窗，避免误触发
+                            hist.push(mdVal);
+                            if (hist.length > mdDays) hist.shift();
+                        }
+                        let high = hist.length ? hist[0] : 0;
+                        for (let w = 1; w < hist.length; w++) if (hist[w] > high) high = hist[w];
+                        if (high > 0 && mdVal != null && mdVal > 0) dd = (high - mdVal) / high;
+                        const hit = high > 0 && dd >= mdPctTh;
+                        if (plan.mdContinuous) {
+                            // 连续投资：本轮次回撤超过阈值后，每次创出本轮次新的最深回撤（dd 严格大于本轮记录）才投一笔；
+                            // 横盘（dd 未创新高）或反弹（dd 缩小）不投。首笔（本轮无记录）hit 即建仓。
+                            // 创出阶段新高（回撤归零 dd<=0）即本轮次结束，重置本轮最深回撤，下一轮下跌重新计数。
+                            if (mdVal != null && mdVal > 0 && dd <= 0) planMaxDD[plan.id] = null;
+                            const maxDD = planMaxDD[plan.id];
+                            if (hit && (maxDD == null || dd > maxDD)) shouldInvest = true;
+                        } else if (hit) {
+                            shouldInvest = true;
+                            hist.length = 0;   // 单笔模式：重置窗口，创阶段新高后重新计算可再触发
+                        }
+                        // 当日序列值有效时，滚动更新本次记录的最大回撤比例（供次日比较是否创最深）
+                        if (mdVal != null && mdVal > 0) {
+                            const curMaxDD = planMaxDD[plan.id];
+                            planMaxDD[plan.id] = Math.max(curMaxDD != null ? curMaxDD : 0, dd);
+                        }
                     }
                 }
             }
             if (shouldInvest && poolBalance >= amt) {
-                fundShares[fund] += amt / nav;
-                fundRunPrincipal[fund] += amt;
-                fundCostBasis[fund] += amt;
-                fundRunMaxPrincipal[fund] = Math.max(fundRunMaxPrincipal[fund], fundRunPrincipal[fund]);
-                fundMaxPrincipal[fund] = Math.max(fundMaxPrincipal[fund], fundRunPrincipal[fund]);
+                planShares[plan.id] += amt / nav;
+                planRunPrincipal[plan.id] += amt;
+                planCostBasis[plan.id] += amt;
+                planRunMaxPrincipal[plan.id] = Math.max(planRunMaxPrincipal[plan.id], planRunPrincipal[plan.id]);
+                planMaxPrincipal[plan.id] = Math.max(planMaxPrincipal[plan.id], planRunPrincipal[plan.id]);
                 dailyInv += amt;
                 cashFlows.push(-amt);
                 flowDates.push(new Date(currentDt));
                 poolBalance -= amt;
                 if (poolBalance < minPoolBalance) minPoolBalance = poolBalance;   // 更新运行期最低余额
+                if (plan.type === 'maxDrawdown') planMdEvents[plan.id].push({ fund: plan.fund, dateStr: currentDateStr, nav: nav, amt: amt });
+                else if (plan.type === 'single' || plan.type === 'weekly' || plan.type === 'biweekly' || plan.type === 'monthly') {
+                    planInvestEvents[plan.id].push({ type: plan.type, fund: plan.fund, dateStr: currentDateStr, nav: nav, amt: amt });
+                }
             }
         }
         let mv = 0;
-        for (const code of Object.keys(fundShares)) {
+        for (const plan of investmentPlans) {
+            const code = plan.fund;
             const fundData = fundsData[code];
             let nav;
             if (doFill) nav = fundNavMap[code].get(dateStr);
             else { const idx = fundData.dates.findIndex(d => formatDate(d) === dateStr); if (idx !== -1) nav = fundData.nav[idx]; }
-            if (nav !== undefined) mv += fundShares[code] * nav;
+            if (nav !== undefined) mv += planShares[plan.id] * nav;
         }
         dailyAsset.push(mv + totalCash);
+        comboNavHist.push(mv + totalCash);   // 组合净值入窗（供 maxDrawdown 组合净值基准）
+        dailyHoldAsset.push(mv);
         dailyDates.push(new Date(currentDt));
         dailyInvest.push(dailyInv);
         dailyCashDiv.push(totalCashDiv);
@@ -731,9 +795,10 @@ function runBacktest() {
     }
 
     let marketValue = 0;
-    for (const code of Object.keys(fundShares)) {
+    for (const plan of investmentPlans) {
+        const code = plan.fund;
         const fundData = fundsData[code];
-        marketValue += fundShares[code] * fundData.nav[fundData.nav.length-1];
+        marketValue += planShares[plan.id] * fundData.nav[fundData.nav.length-1];
     }
     const cashDiv = totalCashDiv;
     const totalAsset = marketValue + totalCash;
@@ -741,16 +806,35 @@ function runBacktest() {
     flowDates.push(dailyDates[dailyDates.length-1]);
     const totalInvest = -cashFlows.reduce((s, v) => s + (v < 0 ? v : 0), 0);
     const totalReturn = totalInvest > 0 ? (totalAsset / totalInvest - 1) * 100 : 0;
-    // 止盈聚合（跨基金）
+    // 止盈聚合：按 plan 维度统计后，按 plan.fund 汇总回填（保持按基金展示结构）
     const stopGainByFund = {};
     const stopGainEvents = [];
     let totalMaxPrincipal = 0, totalRedeemedAll = 0;
-    Object.keys(fundMaxPrincipal).forEach(code => {
-        totalMaxPrincipal += fundMaxPrincipal[code];
-        totalRedeemedAll += fundRedeemed[code];
-        if (fundStopGainEvents[code].length) {
-            stopGainByFund[code] = { events: fundStopGainEvents[code], totalRedeemed: fundRedeemed[code] };
-            fundStopGainEvents[code].forEach(e => stopGainEvents.push({ fund: code, dateStr: e.dateStr, proceeds: e.proceeds, ratio: e.ratio, nav: e.nav }));
+    investmentPlans.forEach(plan => {
+        totalMaxPrincipal += planMaxPrincipal[plan.id];
+        totalRedeemedAll += planRedeemed[plan.id];
+        if (planStopGainEvents[plan.id].length) {
+            const code = plan.fund;
+            if (!stopGainByFund[code]) stopGainByFund[code] = { events: [], totalRedeemed: 0 };
+            planStopGainEvents[plan.id].forEach(e => {
+                stopGainByFund[code].events.push(e);
+                stopGainByFund[code].totalRedeemed += e.proceeds;
+                stopGainEvents.push({ fund: code, dateStr: e.dateStr, proceeds: e.proceeds, ratio: e.ratio, nav: e.nav });
+            });
+        }
+    });
+    // 最大回撤投资聚合：按 plan 汇总触发加仓事件（用于组合总资产曲线三角标注）
+    const mdEvents = [];
+    investmentPlans.forEach(plan => {
+        if (planMdEvents[plan.id] && planMdEvents[plan.id].length) {
+            planMdEvents[plan.id].forEach(e => mdEvents.push(e));
+        }
+    });
+    // 普通定投/单笔投资聚合：按 plan 汇总触发事件（用于组合总资产曲线圆点标注）
+    const investEvents = [];
+    investmentPlans.forEach(plan => {
+        if (planInvestEvents[plan.id] && planInvestEvents[plan.id].length) {
+            planInvestEvents[plan.id].forEach(e => investEvents.push(e));
         }
     });
     const hasStopGainPlan = investmentPlans.some(p => p.stopGain);
@@ -773,9 +857,9 @@ function runBacktest() {
     const _m = computeMetrics(validDates, validAssets, validInvest);
     let annualVolatility = _m.annualVolatility, sharpeRatio = _m.sharpeRatio, calmarRatio = _m.calmarRatio, maxDrawdown = _m.maxDrawdown;
     let annualReturnPct = _m.annualReturnPct, winRate = _m.winRate, maxDDDuration = _m.maxDDDuration, netValues = _m.netValues;
-    backtestResult = { dates: validDates, assets: validAssets, netValues, invests: validInvest, cashDivs: validCashDivs, totalCashSeries: validTotalCash,
+    backtestResult = { dates: validDates, assets: validAssets, holdAssets: dailyHoldAsset.slice(startIdx), netValues, invests: validInvest, cashDivs: validCashDivs, totalCashSeries: validTotalCash,
         simDateStrs: allDateStrs, simNav: simNav, simDiv: simDiv, simDow: simDow, simDateTs: simDateTs, simDayOfMonth: simDayOfMonth, simStartIdx: startIdx,
-        stopGainByFund, stopGainEvents, totalMaxPrincipal, totalRedeemedAll, maxPrincipalReturn, hasStopGainPlan,
+        stopGainByFund, stopGainEvents, totalMaxPrincipal, totalRedeemedAll, maxPrincipalReturn, hasStopGainPlan, mdEvents, investEvents,
         maxDDPeak: _m.maxDDPeak, maxDDTrough: _m.maxDDTrough, ddDurPeak: _m.ddDurPeak, ddDurTrough: _m.ddDurTrough };
 
     const twrHtml = isNaN(annualReturnPct) ? '-' : annualReturnPct.toFixed(2) + '%';

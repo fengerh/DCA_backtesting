@@ -527,16 +527,23 @@ async function updateCharts() {
         for (let i = 0; i < redeemedCumFull.length; i++) { if (idxMap.has(i)) run += idxMap.get(i); redeemedCumFull[i] = run; }
     }
 
-    const filtered = backtestResult.dates.map((d,i)=>({idx:i, date:d, asset:backtestResult.assets[i], nv:backtestResult.netValues[i], invest:(backtestResult.invests||[])[i]||0, cashDiv:(backtestResult.cashDivs||[])[i]||0, redeemed:redeemedCumFull[i]}))
+    const filtered = backtestResult.dates.map((d,i)=>({idx:i, date:d, asset:backtestResult.assets[i], hold:(backtestResult.holdAssets||[])[i]||0, nv:backtestResult.netValues[i], invest:(backtestResult.invests||[])[i]||0, cashDiv:(backtestResult.cashDivs||[])[i]||0, redeemed:redeemedCumFull[i]}))
         .filter(item => item.date >= startDate && item.date <= endDate);
     const chartDates = filtered.map(d => formatDate(d.date));
     const chartAssets = filtered.map(d => d.asset);
+    const chartHoldAssets = filtered.map(d => d.hold);
     const chartNetValues = filtered.map(d => d.nv);
     const chartCashDivs = filtered.map(d => d.cashDiv);
     const chartRedeemed = filtered.map(d => d.redeemed);
-    // 累计净收益 = 总资产 - 累计投入本金
-    let cumInvest = 0;
-    const chartNetProfit = filtered.map(d => { cumInvest += d.invest; return d.asset - cumInvest; });
+    // 累计净收益 = 总资产 - 累计投入本金。
+    // 注意：backtestResult.invests[i] 是“当日新增投入”（backtest.js 中 dailyInv 每个
+    // 日期重置为 0 再累加当日投入），故累计投入本金须对 invests[0..idx] 全量求和，
+    // 绝不能只减当日增量（否则净收益≈总资产≈市值），也不能依赖筛选窗口内累加
+    // （筛选起点晚于首笔时漏算历史本金、起点被放大）。此处按 filtered 保留的原始
+    // 索引 idx 从全量累计投入数组取值，使日期筛选不影响净收益口径。
+    let _run = 0;
+    const cumInvestFull = (backtestResult.invests || []).map(v => (_run += v));
+    const chartNetProfit = filtered.map(d => d.asset - (cumInvestFull[d.idx] || 0));
     // 资金加权净值（mw）——份额法，保留投入/取出节奏：
     //   · 用每日组合总价值(持仓市值+落袋现金)的涨跌幅平移净值；
     //   · 每日现金流(投入为正流出、取出为正流入)按前一日净值折算为本金份额的增减。
@@ -586,7 +593,37 @@ async function updateCharts() {
     }
     const hasStopGain = stopGainByDate.size > 0;
     const netStopGainData = chartDates.map((ds, i) => stopGainByDate.has(ds) ? chartNetValues[i] : null);
-    const assetStopGainData = chartDates.map((ds, i) => stopGainByDate.has(ds) ? chartAssets[i] : null);
+    const assetStopGainData = chartDates.map((ds, i) => stopGainByDate.has(ds) ? chartHoldAssets[i] : null);
+
+    // 最大回撤投资触发加仓事件聚合（用于组合总资产曲线三角标注）
+    const mdByDate = new Map();
+    if (backtestResult.mdEvents && backtestResult.mdEvents.length) {
+        backtestResult.mdEvents.forEach(e => {
+            if (!mdByDate.has(e.dateStr)) mdByDate.set(e.dateStr, []);
+            mdByDate.get(e.dateStr).push(e);
+        });
+    }
+    const hasMd = mdByDate.size > 0;
+    const assetMdData = chartDates.map((ds, i) => mdByDate.has(ds) ? chartHoldAssets[i] : null);
+
+    // 普通定投（weekly/biweekly/monthly）与单笔（single）投资触发事件聚合（用于组合总资产曲线圆点标注）
+    const dcaByDate = new Map();
+    const singleByDate = new Map();
+    if (backtestResult.investEvents && backtestResult.investEvents.length) {
+        backtestResult.investEvents.forEach(e => {
+            if (e.type === 'single') {
+                if (!singleByDate.has(e.dateStr)) singleByDate.set(e.dateStr, []);
+                singleByDate.get(e.dateStr).push(e);
+            } else {
+                if (!dcaByDate.has(e.dateStr)) dcaByDate.set(e.dateStr, []);
+                dcaByDate.get(e.dateStr).push(e);
+            }
+        });
+    }
+    const hasDca = dcaByDate.size > 0;
+    const hasSingle = singleByDate.size > 0;
+    const assetDcaData = chartDates.map((ds, i) => dcaByDate.has(ds) ? chartHoldAssets[i] : null);        // 灰色实心圆
+    const assetSingleData = chartDates.map((ds, i) => singleByDate.has(ds) ? chartHoldAssets[i] : null); // 黑色实心圆
 
     let benchmarkDataset = null;
     if (currentBenchmarkId && filtered.length > 0) {
@@ -753,6 +790,9 @@ async function updateCharts() {
     const assetDatasets = [{
         label: '总资产', data: chartAssets, borderColor: '#3b82f6',
         backgroundColor: 'rgba(59,130,246,0.1)', fill: true, tension: 0.1, pointRadius: 0
+    }, {
+        label: '持仓市值', data: chartHoldAssets, borderColor: '#8b5cf6',
+        backgroundColor: 'transparent', fill: false, tension: 0.1, pointRadius: 0
     }];
     // 累计净收益（总资产 - 累计投入本金）
     assetDatasets.push({
@@ -786,6 +826,48 @@ async function updateCharts() {
             borderWidth: 2
         });
     }
+    if (hasMd) {
+        // 最大回撤投资触发加仓三角（蓝色，区别于止盈红色），落在持仓市值曲线
+        assetDatasets.push({
+            label: '回撤加仓',
+            data: assetMdData,
+            showLine: false,
+            pointStyle: 'triangle',
+            pointRadius: 7,
+            pointHoverRadius: 9,
+            backgroundColor: '#2563eb',
+            borderColor: '#2563eb',
+            isMdMarker: true
+        });
+    }
+    if (hasDca) {
+        // 普通定投触发圆点（与持仓市值曲线同色，落在持仓市值曲线）
+        assetDatasets.push({
+            label: '普通定投',
+            data: assetDcaData,
+            showLine: false,
+            pointStyle: 'circle',
+            pointRadius: 3,
+            pointHoverRadius: 5,
+            backgroundColor: '#8b5cf6',
+            borderColor: '#8b5cf6',
+            isDcaMarker: true
+        });
+    }
+    if (hasSingle) {
+        // 单笔投资触发圆点（与持仓市值曲线同色，落在持仓市值曲线）
+        assetDatasets.push({
+            label: '单笔投资',
+            data: assetSingleData,
+            showLine: false,
+            pointStyle: 'circle',
+            pointRadius: 3,
+            pointHoverRadius: 5,
+            backgroundColor: '#8b5cf6',
+            borderColor: '#8b5cf6',
+            isSingleMarker: true
+        });
+    }
     assetChart = new Chart(assetCtx, {
         type: 'line', data: { labels: chartDates, datasets: assetDatasets },
         options: {
@@ -801,6 +883,33 @@ async function updateCharts() {
                                 evs.forEach(function(e, idx) {
                                     const cn = fundCodeName(e.fund);
                                     s += (idx > 0 ? '; ' : '') + cn.code + ' 赎回' + e.proceeds.toFixed(2) + '元(' + (e.ratio*100).toFixed(0) + '%)';
+                                });
+                                return s;
+                            }
+                            if (context.dataset.isMdMarker && context.parsed.y != null) {
+                                const evs = mdByDate.get(chartDates[context.dataIndex]) || [];
+                                let s = '回撤加仓：';
+                                evs.forEach(function(e, idx) {
+                                    const cn = fundCodeName(e.fund);
+                                    s += (idx > 0 ? '; ' : '') + cn.code + ' 加仓' + e.amt.toFixed(2) + '元@' + e.nav.toFixed(4);
+                                });
+                                return s;
+                            }
+                            if (context.dataset.isDcaMarker && context.parsed.y != null) {
+                                const evs = dcaByDate.get(chartDates[context.dataIndex]) || [];
+                                let s = '普通定投：';
+                                evs.forEach(function(e, idx) {
+                                    const cn = fundCodeName(e.fund);
+                                    s += (idx > 0 ? '; ' : '') + cn.code + ' 投入' + e.amt.toFixed(2) + '元';
+                                });
+                                return s;
+                            }
+                            if (context.dataset.isSingleMarker && context.parsed.y != null) {
+                                const evs = singleByDate.get(chartDates[context.dataIndex]) || [];
+                                let s = '单笔投资：';
+                                evs.forEach(function(e, idx) {
+                                    const cn = fundCodeName(e.fund);
+                                    s += (idx > 0 ? '; ' : '') + cn.code + ' 投入' + e.amt.toFixed(2) + '元';
                                 });
                                 return s;
                             }
