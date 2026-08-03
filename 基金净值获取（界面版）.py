@@ -41,6 +41,9 @@ def get_fund_data_akshare(fund_code, start_date, end_date, dividend_cache):
         nv_df['单位净值'] = pd.to_numeric(nv_df['单位净值'], errors='coerce')
         nv_df.sort_values(by='日期', ascending=True, inplace=True)
         nv_df.reset_index(drop=True, inplace=True)
+        # 剔除周六、周日的冗余净值记录（保留周一~周五真实交易日，dayofweek：周一=0 ... 周日=6）
+        nv_df = nv_df[nv_df['日期'].dt.dayofweek < 5]
+        nv_df = nv_df.reset_index(drop=True)
     except Exception as e:
         return pd.DataFrame()
 

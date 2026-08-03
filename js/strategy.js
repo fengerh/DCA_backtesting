@@ -98,6 +98,7 @@ function addScItem() {
         maDays: 250, lowCoef: 1.5, highCoef: 0.5,   // 投资'4'均线
         valWindow: 250, valK: 1.0,                   // 投资'6'估值
         mdDays: 120, mdPct: 10,                       // 投资'7'最大回撤
+        mdBench: 'self',                              // 投资'7'回撤基准：self=基金自身净值（默认） / portfolio=组合净值 / bench:<id>=导入基准
         mdContinuous: false,                          // 投资'7'连续投资：窗口持续计算，满足回撤阈值即每期投一笔
         stopGainPct: 8, stopGainDrawdown: 10, stopGainSellRatio: 100,  // 止盈参数
         startDate: fundsData[f].minDate,
@@ -230,11 +231,16 @@ function scExtraHtml(item) {
             ${note('按历史分位调整投入：分位越低投越多（k越大调整越灵敏）')}
         </div>`;
     } else if (item.investStrategy === '7') {
-        investPart = `<div class="flex items-center gap-2">
-            <span class="text-xs font-medium text-rose-600 whitespace-nowrap self-center">最大回撤</span>
-            <div class="flex items-end gap-2">${f('回撤窗口(日)', 'mdDays', 'min="5"', item.mdDays)}${f('回撤阈值(%)', 'mdPct', 'step="0.5"', item.mdPct)}</div>
-            <label class="flex items-center gap-1 text-xs font-medium text-gray-700 cursor-pointer whitespace-nowrap"><input type="checkbox" data-field="mdContinuous" ${item.mdContinuous ? 'checked' : ''} class="w-4 h-4"> 连续投资</label>
-            ${note(item.mdContinuous ? '窗口持续计算：回撤达阈值即每个交易日投一笔，回撤收窄至阈值以下即停止，可反复触发。' : '近窗口内从最高净值回撤达阈值时投一笔（baseAmount），创阶段新高后可再触发。')}
+        const mdBenchSel = `<select data-field="mdBench" class="p-1 border rounded text-xs">${mdBenchOptions(item.mdBench)}</select>`;
+        investPart = `<div class="flex flex-col gap-2">
+            <span class="text-xs font-medium text-rose-600 whitespace-nowrap">最大回撤</span>
+            <div class="flex flex-wrap items-end gap-3">
+                ${f('回撤窗口(日)', 'mdDays', 'min="5"', item.mdDays)}
+                ${f('回撤阈值(%)', 'mdPct', 'step="0.5"', item.mdPct)}
+                <label class="flex items-center gap-1 text-xs font-medium text-gray-700 cursor-pointer whitespace-nowrap self-center"><input type="checkbox" data-field="mdContinuous" ${item.mdContinuous ? 'checked' : ''} class="w-4 h-4"> 连续投资</label>
+                <span class="flex items-center gap-1 text-xs text-gray-600 whitespace-nowrap self-center">回撤基准 ${mdBenchSel}</span>
+            </div>
+            <div class="text-[11px] text-gray-400">${item.mdContinuous ? '窗口持续计算：回撤达阈值即每个交易日投一笔，回撤收窄至阈值以下即停止，可反复触发。' : '近窗口内从最高净值回撤达阈值时投一笔（baseAmount），创阶段新高后可再触发。'}</div>
         </div>`;
     }
     // 止盈方式专属参数
@@ -278,6 +284,8 @@ function simulateStrategy(item, pool) {
     }
     const N = dates.length;
     if (N < 2) return null;
+    // 导入基准净值映射缓存（按基准 id），maxDrawdown 选 bench:<id> 时懒加载一次
+    const scBenchNavMaps = {};
 
     const dow = new Array(N), dom = new Array(N);
     for (let k = 0; k < N; k++) { dow[k] = dates[k].getUTCDay(); dom[k] = parseInt(dateStrs[k].split('-')[2], 10); }
@@ -355,12 +363,15 @@ function simulateStrategy(item, pool) {
     const cashFlows = [], flowDates = [], assets = [], invests = [], cashDivs = [], peakPrincipal = [];
     const flows = [];   // 每日带符号净外部现金流（买入>0，赎回<0，不含分红），供时间加权净值(份额法)使用
     const stopGainEvents = [];   // 记录每次止盈触发的交易日下标
+    const mdEventIdx = [];       // 记录每次成功"回撤加仓"的交易日下标（inv==='7'）
+    const dcaEventIdx = [];      // 记录每次成功"普通定投"买入的交易日下标（inv 1/2/3/4/6）
     const holdAssets = [], holdCost = []; // 每日持仓市值 / 持仓成本（不含已落袋现金）
 
     // 最大回撤投资（inv==='7'）：滑动窗口最高净值，回撤达阈值即投一笔（baseAmount），窗口重置后可再次触发
     const mdDays = inv === '7' ? Math.max(5, parseInt(item.mdDays) || 120) : 0;
     const mdPctTh = inv === '7' ? (parseFloat(item.mdPct) || 10) / 100 : 0;
     const win = [];
+    let maxDD = null;   // 本次下跌记录的最大回撤比例（连续投资"创最深才买"用）
 
     for (let k = 0; k < N; k++) {
         const nav = navs[k];
@@ -383,17 +394,46 @@ function simulateStrategy(item, pool) {
         }
         // 最大回撤投资（事件驱动，inv==='7'）
         if (inv === '7' && mdDays > 0) {
-            win.push(nav);
-            if (win.length > mdDays) win.shift();
-            let windowHigh = win[0];
-            for (let w = 1; w < win.length; w++) if (win[w] > windowHigh) windowHigh = win[w];
-            const hit = windowHigh > 0 && (windowHigh - nav) / windowHigh >= mdPctTh;
-            if (item.mdContinuous) {
-                // 连续投资：窗口持续滚动计算，满足回撤阈值即每交易日投一笔；不满足即不投（不重置窗口，可反复触发）
-                if (hit) amt = item.baseAmount;
-            } else if (hit) {
-                amt = item.baseAmount;
-                win.length = 0;   // 单笔模式：重置窗口，需重新累积新高峰后才可再次触发
+            // 仅在真实交易日推窗与判定：周末/非交易日（dow 为 6 周六 / 0 周日）的净值通常与前日一致，
+            // 若据此推进窗口或触发，会在非交易日误生成回撤加仓标记，故整体跳过（不推窗、不判定、不更新 maxDD）。
+            if (dow[k] === 6 || dow[k] === 0) {
+                // 跳过非交易日的回撤投资逻辑
+            } else {
+                // 回撤基准序列当日值：self=基金自身净值；portfolio=单基金即自身净值（等价 self）；bench:<id>=导入基准净值
+                // 只看基准：mdBench='bench:<id>' 时仅用基准当日值做判断，绝不回退到基金净值；
+                // 基准当天无值（含超出基准数据范围的日期）时 mdVal=null，由下方 "mdVal != null 才推窗/判定" 自然忽略该日，
+                // 与组合回测（runBacktest）口径完全一致，避免在基准缺值日误触发回撤加仓。
+                let mdVal;
+                const mb = item.mdBench || 'self';
+                if (mb.indexOf('bench:') === 0) {
+                    const bid = parseInt(mb.slice(6), 10);
+                    if (!scBenchNavMaps[bid]) scBenchNavMaps[bid] = getBenchmarkNavMap(bid);
+                    const m = scBenchNavMaps[bid];
+                    mdVal = m ? (m.get(dateStrs[k]) ?? null) : null;
+                } else {
+                    mdVal = nav;   // self / portfolio：基金自身净值
+                }
+                let dd = 0;   // 当日回撤比例（窗口高点 - 当日值）/ 窗口高点
+                if (mdVal != null && mdVal > 0) {   // 基准当日不可得或无效时跳过推窗，避免误触发
+                    win.push(mdVal);
+                    if (win.length > mdDays) win.shift();
+                }
+                let windowHigh = win.length ? win[0] : 0;
+                for (let w = 1; w < win.length; w++) if (win[w] > windowHigh) windowHigh = win[w];
+                if (windowHigh > 0 && mdVal != null && mdVal > 0) dd = (windowHigh - mdVal) / windowHigh;
+                const hit = windowHigh > 0 && dd >= mdPctTh;
+                if (item.mdContinuous) {
+                    // 连续投资：本轮次回撤超过阈值后，每次创出本轮次新的最深回撤（dd 严格大于本轮记录）才投一笔；
+                    // 横盘（dd 未创新高）或反弹（dd 缩小）不投。首笔（本轮无记录）hit 即建仓。
+                    // 创出阶段新高（回撤归零 dd<=0）即本轮次结束，重置本轮最深回撤，下一轮下跌重新计数。
+                    if (mdVal != null && mdVal > 0 && dd <= 0) maxDD = null;
+                    if (hit && (maxDD == null || dd > maxDD)) amt = item.baseAmount;
+                } else if (hit) {
+                    amt = item.baseAmount;
+                    win.length = 0;   // 单笔模式：重置窗口，需重新累积新高峰后才可再次触发
+                }
+                // 当日序列值有效时，滚动更新本次记录的最大回撤比例（供次日比较是否创最深）
+                if (mdVal != null && mdVal > 0) maxDD = Math.max(maxDD != null ? maxDD : 0, dd);
             }
         }
         // 止盈（按 stopGain 类型；原策略5 行为由 investStrategy:'2'+stopGain:'target' 等价替代）
@@ -442,6 +482,9 @@ function simulateStrategy(item, pool) {
                         if (pool.minRemaining === undefined || pool.remaining < pool.minRemaining) pool.minRemaining = pool.remaining;
                     }
                     didInvest = amt;
+                    // 记录成功正买入事件：inv==='7' 记为回撤加仓，其余定期买入记为普通定投
+                    if (inv === '7') mdEventIdx.push(k);
+                    else dcaEventIdx.push(k);
                 }
                 // 资金池不足：跳过整笔买入（不计现金流、不增份额）
             } else {
@@ -478,7 +521,7 @@ function simulateStrategy(item, pool) {
     const netProfit = finalAsset - totalInvested;                 // = 总赎回+市值+累积现金分红−总定投
     const maxPrincipalReturn = maxPrincipal > 0 ? netProfit / maxPrincipal * 100 : 0;   // 收益率(峰值本金)
     const m = computeMetrics(dates, assets, invests);
-    return { item, dates, assets, invests, flows, cashDivs, holdAssets, holdCost, totalInvested, finalAsset, totalReturn, xirrVal, stopGainCount, maxPrincipal, maxPrincipalReturn, totalRedeemed, totalDividendCash, peakPrincipal, stopGainEvents, firstInvestDate: dates[investIdx[0]], metrics: m };
+    return { item, dates, assets, invests, flows, cashDivs, holdAssets, holdCost, totalInvested, finalAsset, totalReturn, xirrVal, stopGainCount, maxPrincipal, maxPrincipalReturn, totalRedeemed, totalDividendCash, peakPrincipal, stopGainEvents, mdEventIdx, dcaEventIdx, firstInvestDate: dates[investIdx[0]], metrics: m };
 }
 
 function runStrategyCompare() {
@@ -906,6 +949,9 @@ function drawScChart() {
         const inv = r.invests || [];
         const isStopGain = r.item.stopGain !== 'none';   // 止盈策略：净值采用"1+最大本金收益率"口径
         const sgSet = isStopGain && r.stopGainEvents ? new Set(r.stopGainEvents) : null;
+        // 回撤加仓 / 普通定投事件下标集合（仅当策略有对应投资类型时构造，避免空 Set 干扰）
+        const mdSet = (r.item.investStrategy === '7' && r.mdEventIdx) ? new Set(r.mdEventIdx) : null;
+        const dcaSet = (r.item.investStrategy !== '7' && r.dcaEventIdx) ? new Set(r.dcaEventIdx) : null;
         // 时间加权净值(份额法/TWR)口径：按结果预计算一次，net 模式且 scNetMode==='portfolio' 时启用
         const pnvArr = (scNetMode === 'portfolio') ? portfolioNetValues(r.assets, r.flows || []) : null;
         const color = SC_COLORS[idx % SC_COLORS.length];
@@ -918,7 +964,7 @@ function drawScChart() {
             const wantSg = wi === 0;
             const rx = isXirr ? scXirrSeries(r, win.key) : null;
             let cum = 0;
-            const pts = [], sgPts = [];
+            const pts = [], sgPts = [], mdPts = [], dcaPts = [];
             r.dates.forEach((d, i) => {
                 cum += (inv[i] || 0);
                 const months = (d.getTime() - startTs) / (1000 * 60 * 60 * 24 * 30.4375);
@@ -950,6 +996,8 @@ function drawScChart() {
                 const xVal = scChartXMode === 'date' ? d.getTime() : +months.toFixed(2);
                 pts.push({ x: xVal, y: yVal });
                 if (wantSg && sgSet && sgSet.has(i)) sgPts.push({ x: xVal, y: yVal });
+                if (wantSg && mdSet && mdSet.has(i)) mdPts.push({ x: xVal, y: yVal });
+                if (wantSg && dcaSet && dcaSet.has(i)) dcaPts.push({ x: xVal, y: yVal });
             });
             // 同一条目的多个窗口共用主色，靠线型与透明度区分层次
             const lineColor = isXirr && win.alpha < 1 ? hexToRgba(color, win.alpha) : color;
@@ -966,6 +1014,24 @@ function drawScChart() {
                     pointStyle: 'circle', pointRadius: 4, pointHoverRadius: 6,
                     pointBorderColor: '#ffffff', pointBorderWidth: 1.5,
                     showLine: false, fill: false, isStopGainMarker: true
+                });
+            }
+            // 回撤加仓：蓝色三角，样式与组合回测一致
+            if (mdPts.length) {
+                datasets.push({
+                    label: (cn.name || r.item.fund) + '·回撤加仓',
+                    data: mdPts, borderColor: '#2563eb', backgroundColor: '#2563eb',
+                    pointStyle: 'triangle', pointRadius: 7, pointHoverRadius: 9,
+                    showLine: false, fill: false, isMdMarker: true
+                });
+            }
+            // 普通定投：紫色圆点，样式与组合回测一致
+            if (dcaPts.length) {
+                datasets.push({
+                    label: (cn.name || r.item.fund) + '·普通定投',
+                    data: dcaPts, borderColor: '#8b5cf6', backgroundColor: '#8b5cf6',
+                    pointStyle: 'circle', pointRadius: 3, pointHoverRadius: 5,
+                    showLine: false, fill: false, isDcaMarker: true
                 });
             }
         });
@@ -1015,14 +1081,21 @@ function drawScChart() {
                             : '投资净值（资金加权，总资产/累计投入，起点=1.0）')) } }
             },
             plugins: {
-                legend: { position: 'bottom', labels: { filter: (item, data) => !data.datasets[item.datasetIndex].isStopGainMarker } },
+                legend: { position: 'bottom', labels: { filter: (item, data) => {
+                    const ds = data.datasets[item.datasetIndex];
+                    return !ds.isStopGainMarker && !ds.isMdMarker && !ds.isDcaMarker;
+                } } },
                 tooltip: { callbacks: {
                     title: items => scChartXMode === 'date'
                         ? formatDate(new Date(items[0].parsed.x)) : (items[0].parsed.x + ' 月'),
                     // 多曲线叠加时数值需带上曲线名，否则无法分辨属于哪个窗口
-                    label: item => item.dataset.isStopGainMarker ? item.dataset.label
-                        : (isXirr ? item.dataset.label + '：' + item.parsed.y.toFixed(2) + '%'
-                                  : item.parsed.y.toFixed(4))
+                    label: item => {
+                        if (item.dataset.isStopGainMarker) return item.dataset.label;
+                        if (item.dataset.isMdMarker) return item.dataset.label;
+                        if (item.dataset.isDcaMarker) return item.dataset.label;
+                        return isXirr ? item.dataset.label + '：' + item.parsed.y.toFixed(2) + '%'
+                                      : item.parsed.y.toFixed(4);
+                    }
                 } }
             }
         }

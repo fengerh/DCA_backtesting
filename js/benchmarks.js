@@ -25,6 +25,36 @@ async function refreshBenchmarkCache() {
 }
 
 
+// 回撤基准下拉选项缓存：loadBenchmarkList 渲染时同步填充，供组合/策略模式的
+// 计划卡片（同步渲染函数）直接读取，避免异步 db 查询打断 UI 渲染流程。
+let benchmarkListCache = [];
+
+// 回撤基准下拉选项：固定两项（自身净值 / 组合净值）+ 动态导入基准。
+// 供 backtest.js 的 planCardHtml 与 strategy.js 的 scExtraHtml 复用。
+function getBenchmarkOptions() {
+    const opts = [
+        { value: 'self', label: '基金自身净值' },
+        { value: 'portfolio', label: '组合净值' }
+    ];
+    benchmarkListCache.forEach(b => opts.push({ value: 'bench:' + b.id, label: b.name }));
+    return opts;
+}
+
+// 构建指定基准的前向填充净值映射（date -> nav），缺失日取最近一次已知净值。
+// 用于最大回撤投资按"导入基准"计算回撤窗口。
+function getBenchmarkNavMap(id) {
+    if (id == null) return null;
+    const bm = benchmarkListCache.find(b => b.id === id);
+    if (!bm || !bm.data || !bm.data.length) return null;
+    const m = new Map();
+    let last = null;
+    bm.data.slice().sort((a, b) => a.date.localeCompare(b.date)).forEach(d => {
+        if (d.nav !== undefined && !isNaN(d.nav)) last = d.nav;
+        if (last !== null) m.set(d.date, last);
+    });
+    return m;
+}
+
 // 基准列表渲染（含日期范围）
 async function loadBenchmarkList() {
     compositeWeights = {}; // 新增：每次刷新基准列表时清空临时权重
@@ -40,6 +70,7 @@ async function loadBenchmarkList() {
         }
     }
     benchmarks.sort((a, b) => (a.order || 0) - (b.order || 0));
+    benchmarkListCache = benchmarks;   // 缓存供回撤基准下拉同步读取
     // 未选中任何基准时，默认选中第一个（写入顺序首条），使"基准指数工作日检测"立即生效
     const validIds = new Set(benchmarks.map(b => b.id));
     if (benchmarks.length > 0 && (!currentBenchmarkId || !validIds.has(currentBenchmarkId))) {
@@ -111,6 +142,7 @@ async function loadBenchmarkList() {
 async function renderCompositePanel() {
     const benchmarks = await db.benchmarks.toArray();
     benchmarks.sort((a, b) => (a.order || 0) - (b.order || 0));
+    benchmarkListCache = benchmarks;   // 缓存供回撤基准下拉同步读取
     const container = document.getElementById('compositeWeightsContainer');
     if (benchmarks.length === 0) {
         container.innerHTML = '<p class="text-gray-400 text-sm">暂无基准数据，请先上传基准</p>';
@@ -163,6 +195,7 @@ function setEqualWeights() {
 async function generateCompositeBenchmark() {
     const benchmarks = await db.benchmarks.toArray();
     benchmarks.sort((a, b) => (a.order || 0) - (b.order || 0));
+    benchmarkListCache = benchmarks;   // 缓存供回撤基准下拉同步读取
     const activeIds = Object.keys(compositeWeights).filter(id => compositeWeights[id] > 0);
     if (activeIds.length === 0) {
         alert('至少需要一个基准权重 > 0');
@@ -290,23 +323,32 @@ async function clearAllBenchmarks() {
     }
 }
 
-// 解析Sheet数据
+// 解析Sheet数据，返回 { data, skipped, samples }
+// data: 已排序的 {date, nav} 列表；skipped: 被跳过的行数；samples: 最多5条无法
+// 识别的原始首列值（供排查）。无法识别的行安全跳过，绝不整表失败。
 function parseSheetData(sheet) {
+    // raw:true 保留原始类型：真日期单元格给 Date 对象，文本日期给字符串，
+    // 交由 parseDateFlexible 分别处理，避免按单元格显示格式（可能是 mm-dd-yy）猜解析
     const json = XLSX.utils.sheet_to_json(sheet, { header: 1, raw: true });
-    if (json.length < 2) return [];
     const data = [];
+    let skipped = 0;
+    const samples = [];
     for (let i = 1; i < json.length; i++) {
         const row = json[i];
-        if (!row || row.length < 2) continue;
+        if (!row || row.length < 2) { skipped++; continue; }
         const rawDate = row[0];
         const nav = parseFloat(row[1]);
-        if (isNaN(nav)) continue;
+        if (isNaN(nav)) { skipped++; continue; }
         const date = parseDateFlexible(rawDate);
-        if (!date || isNaN(date.getTime())) continue;
+        if (!date || isNaN(date.getTime())) {
+            skipped++;
+            if (samples.length < 5) samples.push(rawDate);
+            continue;
+        }
         data.push({ date: formatDate(date), nav });
     }
     data.sort((a,b) => a.date.localeCompare(b.date));
-    return data;
+    return { data, skipped, samples };
 }
 
 // 上传基准按钮事件
@@ -325,21 +367,33 @@ document.getElementById('uploadBenchmarkBtn').addEventListener('click', async ()
         const existing = await db.benchmarks.toArray();
         const maxOrder = existing.length ? Math.max.apply(null, existing.map(b => b.order || 0)) : 0;
         let importCount = 0;
+        let totalSkipped = 0;
+        const allSamples = [];
         for (let sheetIdx = 0; sheetIdx < sheetNames.length; sheetIdx++) {
             const sheetName = sheetNames[sheetIdx];
             const sheet = workbook.Sheets[sheetName];
             const parsed = parseSheetData(sheet);
-            if (parsed.length === 0) continue;
+            totalSkipped += parsed.skipped;
+            if (parsed.samples.length) allSamples.push(`[${sheetName}] ` + parsed.samples.join(', '));
+            if (parsed.data.length === 0) continue;
             let benchmarkName = sheetName;
             if (sheetNames.length === 1) {
                 const custom = nameInput && nameInput.value.trim();
                 if (custom) benchmarkName = custom;
             }
-            await db.benchmarks.add({ name: benchmarkName, data: parsed, order: maxOrder + 1 + sheetIdx });
+            await db.benchmarks.add({ name: benchmarkName, data: parsed.data, order: maxOrder + 1 + sheetIdx });
             importCount++;
         }
-        if (importCount === 0) alert('未解析到有效数据，请检查日期列格式（支持 Excel 日期、数字序列号、yyyy-mm-dd、yyyy/m/d、yyyy年m月d日、yyyymmdd）');
-        else alert(`成功导入 ${importCount} 个基准`);
+        if (importCount === 0) {
+            alert('未解析到有效数据，请检查日期列格式（支持 Excel 日期、数字序列号、yyyy-mm-dd、yyyy/m/d、yyyy年m月d日、yyyymmdd）');
+        } else {
+            let msg = `成功导入 ${importCount} 个基准`;
+            if (totalSkipped > 0) {
+                msg += `（${totalSkipped} 行日期无法识别已跳过）`;
+                console.warn('基准导入跳过的行样本：\n' + allSamples.slice(0, 5).join('\n'));
+            }
+            alert(msg);
+        }
         fileInput.value = '';
         if (nameInput) nameInput.value = '沪深300';
         await loadBenchmarkList();

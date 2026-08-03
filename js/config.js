@@ -17,7 +17,7 @@ const wdNames = ['周日', '周一', '周二', '周三', '周四', '周五', '�
 const RISK_FREE_RATE = 0.025;
 const MIN_TRADE_DAYS = 30;
 
-let backtestResult = { dates: [], assets: [], netValues: [] };
+let backtestResult = { dates: [], assets: [], holdAssets: [], netValues: [] };
 
 // IndexedDB
 const db = new Dexie('BenchmarkDB');
