@@ -327,7 +327,8 @@ function addPlan() {
         mdContinuous: false,   // 最大回撤连续投资：开启后窗口持续计算，满足回撤阈值即每交易日投一笔，不满足即停
         stopGain: false,
         stopGainPct: 8,
-        stopGainSellRatio: 100
+        stopGainSellRatio: 100,
+        activeRedeems: []   // 主动赎回事件：[{ id, date, mode:'ratio'|'amount', value }]；mode=ratio 按持仓比例%，amount 按金额(元)
     };
     // 同一基金允许多条计划并存（如不同策略/金额），直接新增，不做覆盖
     investmentPlans.push(plan);
@@ -409,6 +410,30 @@ function mdBenchOptions(selected) {
     ).join('');
 }
 
+// 主动赎回配置区 HTML（多事件增删）——参考 strategy.js 的 scActiveRedeemHtml
+function planActiveRedeemHtml(p) {
+    const list = (p.activeRedeems || []).map((r, ri) => `
+      <div class="flex items-center gap-2" data-redeem-idx="${ri}">
+        <input type="date" data-ar-field="date" data-idx="${ri}" value="${r.date || ''}" class="w-32 min-w-0 p-1.5 border border-gray-300 rounded text-sm">
+        <select data-ar-field="mode" data-idx="${ri}" class="p-1.5 border border-gray-300 rounded text-sm">
+          <option value="ratio" ${r.mode === 'ratio' ? 'selected' : ''}>按比例%</option>
+          <option value="shares" ${r.mode === 'shares' ? 'selected' : ''}>按份额(份)</option>
+          <option value="amount" ${r.mode === 'amount' ? 'selected' : ''}>按金额元</option>
+        </select>
+        <input type="number" data-ar-field="value" data-idx="${ri}" value="${r.value != null ? r.value : ''}" step="0.01" min="0" class="w-24 p-1.5 border border-gray-300 rounded text-sm">
+        <button type="button" data-act="delRedeem" data-idx="${ri}" class="text-red-500 hover:text-red-700 text-sm font-medium">✕</button>
+      </div>`).join('');
+    return `
+      <div class="mt-2 border-t border-gray-200 pt-2">
+        <div class="flex items-center gap-2 mb-1">
+          <span class="text-xs font-medium text-orange-600 whitespace-nowrap">主动赎回</span>
+          <button type="button" data-act="addRedeem" class="text-xs text-blue-600 hover:underline">＋ 添加赎回</button>
+          <span class="text-[10px] text-gray-400">指定日期赎回持仓比例/份额/金额（到日自动执行）</span>
+        </div>
+        <div class="flex flex-col gap-1">${list || '<span class="text-[10px] text-gray-400">无主动赎回</span>'}</div>
+      </div>`;
+}
+
 // 单张计划卡片（内联可编辑，data-field 写回 investmentPlans 对应对象）
 function planCardHtml(p) {
     const fundOpts = Object.keys(fundsData).map(k => `<option value="${k}" ${k === p.fund ? 'selected' : ''}>${k}</option>`).join('');
@@ -464,6 +489,7 @@ function planCardHtml(p) {
         <div class="md:col-span-2 flex items-end"><label class="flex items-center gap-2 text-xs font-medium text-gray-700 cursor-pointer h-9"><input type="checkbox" data-field="mdContinuous" ${p.mdContinuous ? 'checked' : ''} class="w-4 h-4"> 连续投资（逢跌每日加仓至回升）</label></div>
         <div class="md:col-span-6 text-[10px] text-gray-400">${p.mdContinuous ? '窗口持续计算：回撤达阈值即每个交易日投一笔，回撤收窄至阈值以下即停止，可反复触发。' : '监测窗口内，从近 N 日最高净值回撤达阈值时投入一笔金额；创阶段新高后重新计算窗口可再触发。'}回撤基准默认用基金自身净值；选「组合净值」按整体组合表现；选导入基准按该指数回撤判定。</div>
       </div>` : ''}
+      ${planActiveRedeemHtml(p)}
       <div class="mt-2 text-left"><button data-act="del" class="text-red-500 hover:text-red-700 text-sm font-medium">删除此计划</button></div>
     </div>`;
 }
@@ -493,12 +519,41 @@ function renderPlanList() {
                     else { const nf = fundsData[p.fund]; if (nf && p.endDate === p.startDate) p.endDate = nf.maxDate; }
                     renderPlanList();
                 } else if (f === 'startDate' && p.type === 'single') {
+                    // 单笔投资：结束日期跟随开始日期，仅同步输入框显示值，
+                    // 不重建整个列表（重建会替换 DOM、丢失焦点，导致方向键无法连续调整日期）。
                     p.endDate = v;
-                    renderPlanList();
+                    const endInput = card.querySelector('[data-field="endDate"]');
+                    if (endInput) endInput.value = v;
                 } else if (f === 'stopGain') {
                     renderPlanList();
                 }
                 checkNavGaps();
+            });
+        });
+        // 主动赎回事件绑定（data-ar-field 带 idx 写回 activeRedeems 对应项）
+        card.querySelectorAll('[data-ar-field]').forEach(el => {
+            el.addEventListener('change', e => {
+                const idx = parseInt(e.target.dataset.idx, 10);
+                const f = e.target.dataset.arField;
+                if (!p.activeRedeems) p.activeRedeems = [];
+                const ev = p.activeRedeems[idx];
+                if (!ev) return;
+                let v = e.target.value;
+                if (f === 'value') v = parseFloat(v);
+                ev[f] = v;
+            });
+        });
+        const addRedeem = card.querySelector('[data-act="addRedeem"]');
+        if (addRedeem) addRedeem.addEventListener('click', () => {
+            if (!p.activeRedeems) p.activeRedeems = [];
+            p.activeRedeems.push({ id: Date.now() + Math.floor(Math.random() * 1000), date: p.startDate || '', mode: 'ratio', value: 10 });
+            renderPlanList();
+        });
+        card.querySelectorAll('[data-act="delRedeem"]').forEach(btn => {
+            btn.addEventListener('click', () => {
+                const idx = parseInt(btn.dataset.idx, 10);
+                if (p.activeRedeems) p.activeRedeems.splice(idx, 1);
+                renderPlanList();
             });
         });
         const del = card.querySelector('[data-act="del"]');
@@ -587,6 +642,8 @@ function runBacktest() {
     const planMaxPrincipal = {}; investmentPlans.forEach(p => planMaxPrincipal[p.id] = 0);
     const planRedeemed = {}; investmentPlans.forEach(p => planRedeemed[p.id] = 0);
     const planStopGainEvents = {}; investmentPlans.forEach(p => planStopGainEvents[p.id] = []);
+    const planActiveRedeemed = {}; investmentPlans.forEach(p => planActiveRedeemed[p.id] = 0);   // 主动赎回到账累计金额
+    const planActiveRedeemEvents = {}; investmentPlans.forEach(p => planActiveRedeemEvents[p.id] = []);   // 主动赎回触发事件
     const planMdEvents = {}; investmentPlans.forEach(p => planMdEvents[p.id] = []);   // 最大回撤投资触发加仓事件
     const planInvestEvents = {}; investmentPlans.forEach(p => planInvestEvents[p.id] = []);   // 普通定投/单笔投资触发事件
     let poolBalance = comboPoolCap;   // 共享资金池当前可用余额：买入扣减、赎回回充
@@ -670,6 +727,37 @@ function runBacktest() {
                         planRunMaxPrincipal[plan.id] = 0;
                     }
                 }
+            }
+        }
+        // 主动赎回（在买入前执行）：命中条目配置的赎回日期时，按比例(持仓%)/份额(份)/金额(元)赎回
+        for (const plan of investmentPlans) {
+            if (!(plan.activeRedeems && plan.activeRedeems.length)) continue;
+            if (planShares[plan.id] <= 0) continue;
+            const fundData = fundsData[plan.fund];
+            let nav;
+            if (doFill) { nav = fundNavMap[plan.fund].get(dateStr); if (nav === undefined) continue; }
+            else { const idx = fundData.dates.findIndex(d => formatDate(d) === dateStr); if (idx === -1) continue; nav = fundData.nav[idx]; }
+            for (const ev of plan.activeRedeems) {
+                if (!ev || ev.date !== dateStr) continue;
+                let sellShares;
+                if (ev.mode === 'amount') {
+                    sellShares = Math.min(planShares[plan.id], (parseFloat(ev.value) || 0) / nav);   // 赎回指定金额对应份额，超持仓全赎
+                } else if (ev.mode === 'shares') {
+                    sellShares = Math.min(planShares[plan.id], parseFloat(ev.value) || 0);   // 赎回指定份额（份），超持仓全赎
+                } else {
+                    // 按比例：以「当前持仓份额」为基数（不受之前赎回影响，可直接按比例赎回）
+                    const ratio = Math.min(1, Math.max(0, (parseFloat(ev.value) || 0) / 100));
+                    sellShares = planShares[plan.id] * ratio;
+                }
+                if (sellShares <= 0) continue;
+                const proceeds = sellShares * nav;
+                const holdShares = planShares[plan.id];   // 赎回时点持有份额（回测后回显）
+                const beforeShares = planShares[plan.id];
+                planShares[plan.id] -= sellShares; totalCash += proceeds; planRedeemed[plan.id] += proceeds; planActiveRedeemed[plan.id] += proceeds;
+                cashFlows.push(proceeds); flowDates.push(new Date(currentDt));
+                poolBalance += proceeds;   // 主动赎回到账回充资金池，可再投
+                if (beforeShares > 0) planCostBasis[plan.id] *= planShares[plan.id] / beforeShares;   // 按份额比例调减成本
+                planActiveRedeemEvents[plan.id].push({ dateStr, proceeds, nav, mode: ev.mode, holdShares });
             }
         }
         for (const plan of investmentPlans) {
@@ -823,6 +911,23 @@ function runBacktest() {
             });
         }
     });
+    // 主动赎回聚合：按 plan 维度统计后，按 plan.fund 汇总回填（供赎回金额浮窗展示明细）
+    const activeRedeemByFund = {};
+    const activeRedeemEvents = [];
+    let totalActiveRedeemed = 0;
+    investmentPlans.forEach(plan => {
+        totalActiveRedeemed += planActiveRedeemed[plan.id];
+        if (planActiveRedeemEvents[plan.id].length) {
+            const code = plan.fund;
+            if (!activeRedeemByFund[code]) activeRedeemByFund[code] = { events: [], totalRedeemed: 0 };
+            planActiveRedeemEvents[plan.id].forEach(e => {
+                activeRedeemByFund[code].events.push(e);
+                activeRedeemByFund[code].totalRedeemed += e.proceeds;
+                activeRedeemEvents.push({ fund: code, dateStr: e.dateStr, proceeds: e.proceeds, nav: e.nav, mode: e.mode });
+            });
+        }
+    });
+    const hasActiveRedeemPlan = investmentPlans.some(p => p.activeRedeems && p.activeRedeems.length);
     // 最大回撤投资聚合：按 plan 汇总触发加仓事件（用于组合总资产曲线三角标注）
     const mdEvents = [];
     investmentPlans.forEach(plan => {
@@ -860,6 +965,7 @@ function runBacktest() {
     backtestResult = { dates: validDates, assets: validAssets, holdAssets: dailyHoldAsset.slice(startIdx), netValues, invests: validInvest, cashDivs: validCashDivs, totalCashSeries: validTotalCash,
         simDateStrs: allDateStrs, simNav: simNav, simDiv: simDiv, simDow: simDow, simDateTs: simDateTs, simDayOfMonth: simDayOfMonth, simStartIdx: startIdx,
         stopGainByFund, stopGainEvents, totalMaxPrincipal, totalRedeemedAll, maxPrincipalReturn, hasStopGainPlan, mdEvents, investEvents,
+        activeRedeemByFund, activeRedeemEvents, totalActiveRedeemed, hasActiveRedeemPlan,
         maxDDPeak: _m.maxDDPeak, maxDDTrough: _m.maxDDTrough, ddDurPeak: _m.ddDurPeak, ddDurTrough: _m.ddDurTrough };
 
     const twrHtml = isNaN(annualReturnPct) ? '-' : annualReturnPct.toFixed(2) + '%';
@@ -937,23 +1043,48 @@ function runBacktest() {
     const rs = document.getElementById('resultSection'); if (rs) rs.style.display = 'block';
 }
 
-// 构建止盈浮窗内容（按单基金列出止盈触发明细）
+// 构建止盈/主动赎回浮窗内容（按单基金列出触发明细）
 function buildStopGainTip() {
-    if (!backtestResult.hasStopGainPlan) return '<div class="text-amber-700 font-medium">无基金启用目标止盈</div>';
-    const byFund = backtestResult.stopGainByFund || {};
-    const codes = Object.keys(byFund);
-    if (codes.length === 0) return '<div class="text-amber-700 font-medium">已启用目标止盈，但回测区间内未触发。</div>';
-    let html = '<div class="font-semibold text-amber-800 mb-2">止盈触发明细（按单基金）</div>';
-    for (const code of codes) {
-        const cn = fundCodeName(code);
-        const info = byFund[code];
-        html += '<div class="mb-3 pb-2 border-b border-amber-100 last:border-0">';
-        html += '<div class="font-medium text-gray-800">' + cn.code + ' ' + (cn.name || '') + '</div>';
-        html += '<div class="text-xs text-gray-500">触发 ' + info.events.length + ' 次 · 累计赎回 ' + info.totalRedeemed.toFixed(2) + ' 元</div>';
-        info.events.forEach(function(e) {
-            html += '<div class="text-xs text-gray-600 mt-1">· ' + e.dateStr + ' 赎回 ' + e.proceeds.toFixed(2) + ' 元（' + (e.ratio*100).toFixed(0) + '%，净值 ' + e.nav.toFixed(4) + '）</div>';
-        });
-        html += '</div>';
+    const hasSg = backtestResult.hasStopGainPlan;
+    const sgByFund = backtestResult.stopGainByFund || {};
+    const sgCodes = hasSg ? Object.keys(sgByFund) : [];
+    const hasAr = backtestResult.hasActiveRedeemPlan;
+    const arByFund = backtestResult.activeRedeemByFund || {};
+    const arCodes = hasAr ? Object.keys(arByFund) : [];
+    if (sgCodes.length === 0 && arCodes.length === 0) {
+        if (!hasSg && !hasAr) return '<div class="text-amber-700 font-medium">未启用目标止盈，也无主动赎回配置</div>';
+        return '<div class="text-amber-700 font-medium">已配置赎回，但回测区间内未触发。</div>';
+    }
+    let html = '';
+    if (sgCodes.length > 0) {
+        html += '<div class="font-semibold text-amber-800 mb-2">止盈触发明细（按单基金）</div>';
+        for (const code of sgCodes) {
+            const cn = fundCodeName(code);
+            const info = sgByFund[code];
+            html += '<div class="mb-3 pb-2 border-b border-amber-100">';
+            html += '<div class="font-medium text-gray-800">' + cn.code + ' ' + (cn.name || '') + '</div>';
+            html += '<div class="text-xs text-gray-500">触发 ' + info.events.length + ' 次 · 累计赎回 ' + info.totalRedeemed.toFixed(2) + ' 元</div>';
+            info.events.forEach(function(e) {
+                html += '<div class="text-xs text-gray-600 mt-1">· ' + e.dateStr + ' 赎回 ' + e.proceeds.toFixed(2) + ' 元（' + (e.ratio*100).toFixed(0) + '%，净值 ' + e.nav.toFixed(4) + '）</div>';
+            });
+            html += '</div>';
+        }
+    }
+    if (arCodes.length > 0) {
+        if (html) html += '<div class="my-2 border-t border-amber-200"></div>';
+        html += '<div class="font-semibold text-orange-700 mb-2">主动赎回明细（按单基金）</div>';
+        for (const code of arCodes) {
+            const cn = fundCodeName(code);
+            const info = arByFund[code];
+            html += '<div class="mb-3 pb-2 border-b border-amber-100 last:border-0">';
+            html += '<div class="font-medium text-gray-800">' + cn.code + ' ' + (cn.name || '') + '</div>';
+            html += '<div class="text-xs text-gray-500">触发 ' + info.events.length + ' 次 · 累计赎回 ' + info.totalRedeemed.toFixed(2) + ' 元</div>';
+            info.events.forEach(function(e) {
+                const modeTxt = e.mode === 'amount' ? '按金额' : '按比例';
+                html += '<div class="text-xs text-gray-600 mt-1">· ' + e.dateStr + ' 赎回 ' + e.proceeds.toFixed(2) + ' 元（' + modeTxt + '，净值 ' + e.nav.toFixed(4) + '）</div>';
+            });
+            html += '</div>';
+        }
     }
     return html;
 }

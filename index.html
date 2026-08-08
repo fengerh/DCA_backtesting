@@ -3,7 +3,7 @@
 <head>
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
-    <title>基金组合回测工具 v20260803.2200</title>
+    <title>基金投资工具 v20260808.2230</title>
     <!-- 依赖库 -->
     <script src="js/xlsx.full.min.js"></script>
     <script src="https://cdn.jsdelivr.net/npm/chart.js@4.4.1/dist/chart.umd.min.js"></script>
@@ -15,7 +15,7 @@
     <div class="max-w-6xl mx-auto">
         <!-- 顶部标题栏：标题 + 项目与报告 + 模式切换 -->
         <div class="flex flex-wrap items-center justify-between gap-4 mb-6">
-            <h1 class="text-3xl font-bold text-gray-800">📊基金回测工具</h1>
+            <h1 class="text-3xl font-bold text-gray-800">基金投资工具</h1>
                 <!-- 项目与报告工具栏 -->
                 <div class="flex flex-wrap items-center gap-3 p-3 bg-blue-50 rounded-lg border border-blue-200">
                     <span class="text-xs text-gray-500">导出项目含全部基准，可一键还原并自动回测</span>
@@ -31,6 +31,7 @@
                 <div class="inline-flex p-1 bg-gray-100 rounded-lg">
                     <button id="modeCombo" onclick="setMode('combo')" class="px-5 py-2 rounded-md font-medium transition bg-white text-indigo-700 shadow-sm">模拟组合回测</button>
                     <button id="modeStrategy" onclick="setMode('sc')" class="px-5 py-2 rounded-md font-medium transition text-gray-600 hover:text-gray-800">定投策略比较</button>
+                    <button id="modeValuation" onclick="setMode('valuation')" class="px-5 py-2 rounded-md font-medium transition text-gray-600 hover:text-gray-800">指数估值比较</button>
                 </div>
             </div>
         </div>
@@ -354,6 +355,7 @@
                                 <th class="px-2 py-2 border-b text-center whitespace-nowrap">最大本金</th>
                                 <th class="px-2 py-2 border-b text-center whitespace-nowrap">最大本金收益率</th>
                                 <th class="px-2 py-2 border-b text-center whitespace-nowrap">累积赎回</th>
+                                <th class="px-2 py-2 border-b text-center whitespace-nowrap">主动赎回</th>
                                 <th class="px-2 py-2 border-b text-center whitespace-nowrap">累积红利</th>
                             </tr>
                         </thead>
@@ -369,6 +371,156 @@
                 </div>
             </div>
         </div>
+
+        <!-- ================= 指数估值比较（顶层大板块） ================= -->
+        <div id="valuationRoot" class="max-w-6xl mx-auto" style="display:none;">
+            <div class="bg-white p-6 rounded-xl shadow-md mb-6">
+                <div class="flex items-center justify-between mb-4">
+                    <h2 class="text-xl font-semibold text-gray-700">指数估值比较</h2>
+                    <div class="flex gap-2">
+                        <button onclick="refreshValuationLists()" class="bg-indigo-100 text-indigo-700 px-4 py-2 rounded-lg hover:bg-indigo-200 transition text-sm">刷新指数列表</button>
+                    </div>
+                </div>
+                <p class="text-sm text-gray-500 mb-4">复用「基准指数」数据：查看单指数在自定义窗口（年/日）内的点位百分位，或对比两个指数的点位/均值比值及其百分位，用高估/低估阈值线辅助判断。</p>
+
+                <div id="valuationNoData" class="hidden bg-amber-50 border border-amber-200 text-amber-700 px-4 py-3 rounded-lg text-sm mb-4">
+                    尚未上传任何基准指数。请先在「📁 数据管理 → 基准指数数据」中上传指数 Excel，再回到此模块使用。
+                </div>
+
+                <!-- 单指数估值配置 -->
+                <div class="border border-gray-100 rounded-xl p-4 mb-6">
+                    <h3 class="text-lg font-medium mb-3 text-gray-700">① 单指数点位百分位</h3>
+                    <div class="grid grid-cols-1 md:grid-cols-5 gap-3 items-end">
+                        <div>
+                            <label class="block text-xs text-gray-600 mb-1">基准指数</label>
+                            <select id="valSingleIndex" class="w-full p-2 border rounded-lg text-sm" title="选择要分析估值的基准指数"></select>
+                        </div>
+                        <div>
+                            <label class="block text-xs text-gray-600 mb-1">点位开始日期</label>
+                            <input type="date" id="valSingleStart" class="w-full p-2 border rounded-lg text-sm" title="点位展示区间的开始日期，空 = 全部数据">
+                        </div>
+                        <div>
+                            <label class="block text-xs text-gray-600 mb-1">点位结束日期</label>
+                            <input type="date" id="valSingleEnd" class="w-full p-2 border rounded-lg text-sm" title="点位展示区间的结束日期，空 = 全部数据">
+                        </div>
+                        <div>
+                            <label class="block text-xs text-gray-600 mb-1">展示开始日期</label>
+                            <input type="date" id="valSingleShowStart" onchange="renderSingleValuation()" class="w-full p-2 border rounded-lg text-sm" title="独立图表展示区间的开始日期，仅控制显示，不影响百分位计算；空 = 随点位区间">
+                        </div>
+                        <div>
+                            <label class="block text-xs text-gray-600 mb-1">展示结束日期</label>
+                            <input type="date" id="valSingleShowEnd" onchange="renderSingleValuation()" class="w-full p-2 border rounded-lg text-sm" title="独立图表展示区间的结束日期，仅控制显示，不影响百分位计算；空 = 随点位区间">
+                        </div>
+                    </div>
+                    <div class="grid grid-cols-1 md:grid-cols-5 gap-3 items-end mt-3">
+                        <div>
+                            <label class="block text-xs text-gray-600 mb-1">滚动年度①</label>
+                            <input type="number" id="valSingleRollYears1" value="3" min="0.5" step="0.5" class="w-full p-2 border rounded-lg text-sm" title="当前点位相对它之前 N 年（滚动窗口，含当日）样本的百分位">
+                        </div>
+                        <div>
+                            <label class="block text-xs text-gray-600 mb-1">滚动年度②</label>
+                            <input type="number" id="valSingleRollYears2" value="0" min="0" step="0.5" class="w-full p-2 border rounded-lg text-sm" title="当前点位相对它之前 N 年（滚动窗口，含当日）样本的百分位；0/空 = 不使用">
+                        </div>
+                        <div>
+                            <label class="block text-xs text-gray-600 mb-1">滚动年度③</label>
+                            <input type="number" id="valSingleRollYears3" value="0" min="0" step="0.5" class="w-full p-2 border rounded-lg text-sm" title="当前点位相对它之前 N 年（滚动窗口，含当日）样本的百分位；0/空 = 不使用">
+                        </div>
+                        <div>
+                            <label class="block text-xs text-gray-600 mb-1">点位百分位均值 N（日）</label>
+                            <input type="number" id="valSingleMeanN" value="20" min="0" step="1" class="w-full p-2 border rounded-lg text-sm" title="对点位做 N 日均线后再算滚动百分位，减少毛刺；0/空 = 直接用点位">
+                        </div>
+                        <div>
+                            <label class="block text-xs text-gray-600 mb-1">阈值 高/低 (%)</label>
+                            <div class="flex gap-2">
+                                <input type="number" id="valSingleHi" value="80" min="1" max="99" step="1" class="w-1/2 p-2 border rounded-lg text-sm" title="高于此百分位视为高估">
+                                <input type="number" id="valSingleLo" value="20" min="1" max="99" step="1" class="w-1/2 p-2 border rounded-lg text-sm" title="低于此百分位视为低估">
+                            </div>
+                        </div>
+                    </div>
+                    <div class="flex items-center justify-between mt-4">
+                        <span id="valSingleHint" class="text-xs text-gray-400"></span>
+                        <button onclick="renderSingleValuation()" class="bg-indigo-600 text-white px-6 py-2 rounded-lg hover:bg-indigo-700 transition text-sm font-medium">生成估值图</button>
+                    </div>
+                </div>
+
+                <!-- 单指数图表（点位 + 百分位 合并一张图，左右轴） -->
+                <div class="border border-gray-100 rounded-xl p-4 mb-6">
+                    <h4 class="text-sm font-medium mb-2 text-gray-700">点位与点位百分位（左轴点位 / 右轴百分位）</h4>
+                    <div class="is-2" style="height:360px;"><canvas id="valPointChart"></canvas></div>
+                </div>
+
+                <!-- 双指数比值配置 -->
+                <div class="border border-gray-100 rounded-xl p-4 mb-6">
+                    <h3 class="text-lg font-medium mb-3 text-gray-700">② 双指数比值百分位</h3>
+                    <div class="grid grid-cols-1 md:grid-cols-5 gap-3 items-end">
+                        <div>
+                            <label class="block text-xs text-gray-600 mb-1">指数 A（分子）</label>
+                            <select id="valRatioA" class="w-full p-2 border rounded-lg text-sm" title="比值计算的分子指数"></select>
+                        </div>
+                        <div>
+                            <label class="block text-xs text-gray-600 mb-1">指数 B（分母）</label>
+                            <select id="valRatioB" class="w-full p-2 border rounded-lg text-sm" title="比值计算的分母指数"></select>
+                        </div>
+                        <div>
+                            <label class="block text-xs text-gray-600 mb-1">点位开始日期</label>
+                            <input type="date" id="valRatioStart" class="w-full p-2 border rounded-lg text-sm" title="比值计算区间（共同交易日交集）的开始日期，空 = 自动按交集">
+                        </div>
+                        <div>
+                            <label class="block text-xs text-gray-600 mb-1">点位结束日期</label>
+                            <input type="date" id="valRatioEnd" class="w-full p-2 border rounded-lg text-sm" title="比值计算区间（共同交易日交集）的结束日期，空 = 自动按交集">
+                        </div>
+                        <div>
+                            <label class="block text-xs text-gray-600 mb-1">比值口径</label>
+                            <div class="flex items-center gap-2">
+                                <select id="valRatioMode" onchange="updateRatioModeInput(); renderRatioValuation()" class="flex-1 p-2 border rounded-lg text-sm" title="用点位相除，还是先对两指数做 N 日均值再相除">
+                                    <option value="point" selected>点位比值</option>
+                                    <option value="ma">N日均值比值</option>
+                                </select>
+                                <input type="number" id="valRatioN" value="20" min="1" step="1" oninput="renderRatioValuation()" class="w-20 p-2 border rounded-lg text-sm disabled:bg-gray-100 disabled:text-gray-400 disabled:cursor-not-allowed" title="N日均值的天数">
+                            </div>
+                        </div>
+                    </div>
+                    <div class="grid grid-cols-1 md:grid-cols-5 gap-3 items-end mt-3">
+                        <div>
+                            <label class="block text-xs text-gray-600 mb-1">滚动年度①</label>
+                            <input type="number" id="valRatioRollYears1" value="3" min="0.5" step="0.5" class="w-full p-2 border rounded-lg text-sm" title="当前比值相对它之前 N 年（滚动窗口，含当日）样本的百分位">
+                        </div>
+                        <div>
+                            <label class="block text-xs text-gray-600 mb-1">滚动年度②</label>
+                            <input type="number" id="valRatioRollYears2" value="0" min="0" step="0.5" class="w-full p-2 border rounded-lg text-sm" title="当前比值相对它之前 N 年（滚动窗口，含当日）样本的百分位；0/空 = 不使用">
+                        </div>
+                        <div>
+                            <label class="block text-xs text-gray-600 mb-1">展示开始日期</label>
+                            <input type="date" id="valRatioShowStart" onchange="renderRatioValuation()" class="w-full p-2 border rounded-lg text-sm" title="独立图表展示区间的开始日期，仅控制显示，不影响百分位计算；空 = 随点位区间">
+                        </div>
+                        <div>
+                            <label class="block text-xs text-gray-600 mb-1">展示结束日期</label>
+                            <input type="date" id="valRatioShowEnd" onchange="renderRatioValuation()" class="w-full p-2 border rounded-lg text-sm" title="独立图表展示区间的结束日期，仅控制显示，不影响百分位计算；空 = 随点位区间">
+                        </div>
+                        <div>
+                            <label class="block text-xs text-gray-600 mb-1">阈值 高/低 (%)</label>
+                            <div class="flex gap-2">
+                                <input type="number" id="valRatioHi" value="80" min="1" max="99" step="1" class="w-1/2 p-2 border rounded-lg text-sm" title="高于此百分位视为高估">
+                                <input type="number" id="valRatioLo" value="20" min="1" max="99" step="1" class="w-1/2 p-2 border rounded-lg text-sm" title="低于此百分位视为低估">
+                            </div>
+                        </div>
+                    </div>
+                    <div class="flex items-center justify-between mt-4">
+                        <span id="valRatioHint" class="text-xs text-gray-400"></span>
+                        <div class="flex gap-2 flex-nowrap">
+                            <button onclick="autoFillRatioDates()" class="whitespace-nowrap bg-indigo-100 text-indigo-700 px-3 py-2 rounded-lg hover:bg-indigo-200 transition text-sm" title="按两指数共同交易日范围自动填充点位区间">自动填充日期（交集）</button>
+                            <button onclick="renderRatioValuation()" class="whitespace-nowrap bg-emerald-600 text-white px-6 py-2 rounded-lg hover:bg-emerald-700 transition text-sm font-medium">生成比值图</button>
+                        </div>
+                    </div>
+                </div>
+
+                <!-- 双指数图表（比值 + 比值百分位 合并一张图，左右轴） -->
+                <div class="border border-gray-100 rounded-xl p-4">
+                    <h4 class="text-sm font-medium mb-2 text-gray-700">比值与比值百分位（左轴比值 / 右轴百分位）</h4>
+                    <div class="is-2" style="height:360px;"><canvas id="valRatioChart"></canvas></div>
+                </div>
+            </div>
+        </div>
     </div>
 
     <script src="js/config.js"></script>
@@ -378,6 +530,7 @@
     <script src="js/analysis.js"></script>
     <script src="js/strategy.js"></script>
     <script src="js/report.js"></script>
+    <script src="js/valuation.js"></script>
     <script src="js/main.js"></script>
 </body>
 </html>

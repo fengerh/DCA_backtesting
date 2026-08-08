@@ -98,13 +98,38 @@ def get_fund_data_akshare(fund_code, start_date, end_date, dividend_cache):
 
 
 CACHE_FILE = "dividend_cache.pkl"
+# 全局标记：load_dividend_cache 是否因读取失败返回空缓存
+# （用于让 update_dividend_cache 区分“文件不存在”与“文件损坏”）
+_cache_load_failed = False
 
-def load_dividend_cache():
-    """加载本地分红缓存（兼容新旧格式）"""
+def _pickle_load_compat(path):
+    """pickle 加载，兼容 pandas 升级导致的内部私有名变更。
+    pandas 3.x 把 tslibs.nattype.__nat_unpickle 改名为 _nat_unpickle，
+    旧版序列化的 pkl 反序列化会因找不到旧名而报错；此处补回旧名后重试。
+    """
+    try:
+        with open(path, 'rb') as f:
+            return pickle.load(f)
+    except AttributeError as e:
+        msg = str(e)
+        if "__nat_unpickle" in msg and "_nat_unpickle" in msg:
+            import pandas._libs.tslibs.nattype as _nt
+            if not hasattr(_nt, "__nat_unpickle") and hasattr(_nt, "_nat_unpickle"):
+                _nt.__nat_unpickle = _nt._nat_unpickle
+            with open(path, 'rb') as f:
+                return pickle.load(f)
+        raise
+
+def load_dividend_cache(print_callback=print):
+    """加载本地分红缓存（兼容新旧格式）。
+
+    - 读取失败（pkl 损坏 / pandas 版本不兼容等）时：返回空缓存，
+      但绝不删除或覆盖本地原文件，避免把用户辛苦重建的缓存冲掉。
+    """
+    global _cache_load_failed
     if os.path.exists(CACHE_FILE):
         try:
-            with open(CACHE_FILE, 'rb') as f:
-                cache = pickle.load(f)
+            cache = _pickle_load_compat(CACHE_FILE)
                 # 判断是否是旧格式（简单字典）
                 if isinstance(cache, dict) and 'last_updated' not in cache:
                     # 旧版缓存（纯按年份字典），转换为新版格式
@@ -114,17 +139,36 @@ def load_dividend_cache():
                     }
                     return new_cache
                 return cache
-        except:
+        except Exception as e:
+            _cache_load_failed = True
+            print_callback(
+                f"⚠ 本地分红缓存 {CACHE_FILE} 读取失败（可能损坏或 pandas 版本不兼容）。\n"
+                f"   错误：{e}\n"
+                f"   原文件已保留，未删除。若要使用分红数据，请先重新生成缓存。"
+            )
             return {'last_updated': None, 'data': {}}
     return {'last_updated': None, 'data': {}}
 
 def save_dividend_cache(cache):
-    """保存分红缓存到本地文件"""
+    """保存分红缓存到本地文件。
+    同时输出一份 xlsx 备份（dividend_cache_backup.xlsx），该格式版本无关，
+    即使未来 pandas 再度升级导致 pkl 无法读取，也可从 xlsx 兜底恢复。
+    """
     try:
         with open(CACHE_FILE, 'wb') as f:
             pickle.dump(cache, f)
     except Exception as e:
         print(f"保存分红缓存失败: {e}")
+    # 版本无关的 xlsx 备份
+    try:
+        data = cache.get('data', cache) if isinstance(cache, dict) else cache
+        xlsx_path = os.path.splitext(CACHE_FILE)[0] + "_backup.xlsx"
+        with pd.ExcelWriter(xlsx_path) as xw:
+            for y, df in sorted(data.items()):
+                if hasattr(df, 'to_excel'):
+                    df.to_excel(xw, sheet_name=str(y), index=False)
+    except Exception as e:
+        print(f"保存分红缓存 xlsx 备份失败（不影响主缓存）: {e}")
 
 def get_months_between(start_date, end_date):
     """获取两个日期之间的所有月份（格式：YYYY-MM）"""
@@ -207,10 +251,17 @@ def update_dividend_cache(years_needed, log_callback, force_refresh=False, offli
         return cache['data']
 
     # ---- 正常模式：先读本地 ----
-    cache = load_dividend_cache()
+    global _cache_load_failed
+    cache = load_dividend_cache(log_callback)
     if isinstance(cache, dict) and 'last_updated' not in cache:
         cache = {'last_updated': None, 'data': cache}
         log_callback("🔄 检测到旧版缓存格式，已自动转换。")
+
+    # 若读取失败：不再联网重拉（避免覆盖本地原文件），直接按无缓存返回，
+    # 让用户自行重建缓存。过往年份也绝不被这里冲掉。
+    if _cache_load_failed:
+        log_callback("🛑 因缓存读取失败，本次跳过分红更新，不联网、不覆盖本地文件。")
+        return cache['data']
 
     if cache['data']:
         cached_years = sorted(cache['data'].keys())

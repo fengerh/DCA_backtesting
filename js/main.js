@@ -13,6 +13,9 @@ document.getElementById('reportHtmlBtn').addEventListener('click', exportReportH
 // 初始化默认模式：进入页面即只显示「模拟组合回测」，隐藏「定投策略比较」
 setMode('combo');
 
+// 初始化比值口径输入框状态（点位比值默认置灰 N 日输入框）
+if (typeof updateRatioModeInput === 'function') updateRatioModeInput();
+
 // 页面加载即从 IndexedDB 还原本地基金数据（自动保存，无需重新上传）
 (async function initFunds() {
     try {
