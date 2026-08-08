@@ -49,21 +49,33 @@ const SC_STOPGAIN_ORDER = ['none', 'target', 'drawdown', 'gainratio'];
 function setMode(mode) {
     const combo = document.getElementById('comboBacktestRoot');
     const sc = document.getElementById('strategyCompareRoot');
+    const val = document.getElementById('valuationRoot');
     const bCombo = document.getElementById('modeCombo');
     const bSc = document.getElementById('modeStrategy');
+    const bVal = document.getElementById('modeValuation');
     const hasFundData = Object.keys(fundsData).length > 0;
     if (mode === 'sc') {
         // 切换到策略比较：彻底隐藏 combo 模式所有内容
         combo.style.display = 'none';
         sc.style.display = 'block';
+        if (val) val.style.display = 'none';
         // 显式隐藏 combo 内的子卡片（防止父容器隐藏后子元素 display:block 干扰）
         const comboCards = ['planListSection','resultSection','profitProbabilitySection','correlationSection','chartFilter','benchmarkSelectorWrapper','periodMetricsSection'];
         comboCards.forEach(id => { const el = document.getElementById(id); if (el) el.style.display = 'none'; });
         if (scItems.length === 0 && hasFundData) addScItem();
+    } else if (mode === 'valuation') {
+        // 切换到指数估值：隐藏 combo 与策略比较内容
+        combo.style.display = 'none';
+        sc.style.display = 'none';
+        if (val) val.style.display = 'block';
+        const scResult = document.getElementById('scResultArea');
+        if (scResult) scResult.classList.add('hidden');
+        if (typeof refreshValuationLists === 'function') refreshValuationLists();
     } else {
-        // 切换到组合回测：彻底隐藏策略比较内容
+        // 切换到组合回测：彻底隐藏策略比较与估值内容
         combo.style.display = 'block';
         sc.style.display = 'none';
+        if (val) val.style.display = 'none';
         // 显式隐藏 scResultArea
         const scResult = document.getElementById('scResultArea');
         if (scResult) scResult.classList.add('hidden');
@@ -81,6 +93,7 @@ function setMode(mode) {
     const idleClass = 'px-5 py-2 rounded-md font-medium transition text-gray-600 hover:text-gray-800';
     bCombo.className = mode === 'combo' ? activeClass : idleClass;
     bSc.className = mode === 'sc' ? activeClass : idleClass;
+    if (bVal) bVal.className = mode === 'valuation' ? activeClass : idleClass;
     currentMode = mode;
 }
 
@@ -101,6 +114,7 @@ function addScItem() {
         mdBench: 'self',                              // 投资'7'回撤基准：self=基金自身净值（默认） / portfolio=组合净值 / bench:<id>=导入基准
         mdContinuous: false,                          // 投资'7'连续投资：窗口持续计算，满足回撤阈值即每期投一笔
         stopGainPct: 8, stopGainDrawdown: 10, stopGainSellRatio: 100,  // 止盈参数
+        activeRedeems: [],   // 主动赎回事件：[{ id, date, mode:'ratio'|'amount', value }]；mode=ratio 按持仓比例%，amount 按金额(元)
         startDate: fundsData[f].minDate,
         endDate: fundsData[f].maxDate,
         div: 'reinvest'
@@ -140,6 +154,33 @@ function renderScItems() {
                 } else if (f === 'investStrategy' || f === 'stopGain' || f === 'freq' || f === 'mdContinuous') {
                     renderScItems();
                 }
+            });
+        });
+        // 主动赎回事件绑定（data-ar-field 带 idx 写回 activeRedeems 对应项）
+        row.querySelectorAll('[data-ar-field]').forEach(el => {
+            el.addEventListener('change', e => {
+                const idx = parseInt(e.target.dataset.idx, 10);
+                const f = e.target.dataset.arField;
+                if (!item.activeRedeems) item.activeRedeems = [];
+                const ev = item.activeRedeems[idx];
+                if (!ev) return;
+                let v = e.target.value;
+                if (f === 'value') v = parseFloat(v);
+                ev[f] = v;
+                if (f === 'mode') renderScItems();   // 切换比例/金额不影响布局，保持一致
+            });
+        });
+        const addRedeem = row.querySelector('[data-act="addRedeem"]');
+        if (addRedeem) addRedeem.addEventListener('click', () => {
+            if (!item.activeRedeems) item.activeRedeems = [];
+            item.activeRedeems.push({ id: Date.now() + Math.floor(Math.random() * 1000), date: item.startDate || '', mode: 'ratio', value: 10 });
+            renderScItems();
+        });
+        row.querySelectorAll('[data-act="delRedeem"]').forEach(btn => {
+            btn.addEventListener('click', () => {
+                const idx = parseInt(btn.dataset.idx, 10);
+                if (item.activeRedeems) item.activeRedeems.splice(idx, 1);
+                renderScItems();
             });
         });
         const del = row.querySelector('[data-act="del"]');
@@ -206,8 +247,33 @@ function scRowHtml(item) {
         <div class="md:col-span-1"><label class="block text-xs text-gray-600 mb-1">分红方式</label><select data-field="div" class="w-full p-2 border rounded-lg text-sm">${divOpts}</select></div>
         <div class="md:col-span-2">${extra}</div>
       </div>
+      ${scActiveRedeemHtml(item)}
       <div class="mt-2 text-left"><button data-act="del" class="text-red-500 hover:text-red-700 text-sm font-medium">删除此条目</button></div>
     </div>`;
+}
+
+// 主动赎回配置区 HTML（多事件增删）
+function scActiveRedeemHtml(item) {
+    const list = (item.activeRedeems || []).map((r, ri) => `
+      <div class="flex items-center gap-2" data-redeem-idx="${ri}">
+        <input type="date" data-ar-field="date" data-idx="${ri}" value="${r.date || ''}" class="w-32 min-w-0 p-1.5 border border-gray-300 rounded text-sm">
+        <select data-ar-field="mode" data-idx="${ri}" class="p-1.5 border border-gray-300 rounded text-sm">
+          <option value="ratio" ${r.mode === 'ratio' ? 'selected' : ''}>按比例%</option>
+          <option value="shares" ${r.mode === 'shares' ? 'selected' : ''}>按份额(份)</option>
+          <option value="amount" ${r.mode === 'amount' ? 'selected' : ''}>按金额元</option>
+        </select>
+        <input type="number" data-ar-field="value" data-idx="${ri}" value="${r.value != null ? r.value : ''}" step="0.01" min="0" class="w-24 p-1.5 border border-gray-300 rounded text-sm">
+        <button type="button" data-act="delRedeem" data-idx="${ri}" class="text-red-500 hover:text-red-700 text-sm font-medium">✕</button>
+      </div>`).join('');
+    return `
+      <div class="mt-2 border-t border-gray-200 pt-2">
+        <div class="flex items-center gap-2 mb-1">
+          <span class="text-xs font-medium text-orange-600 whitespace-nowrap">主动赎回</span>
+          <button type="button" data-act="addRedeem" class="text-xs text-blue-600 hover:underline">＋ 添加赎回</button>
+          <span class="text-[10px] text-gray-400">指定日期赎回持仓比例/份额/金额（到日自动执行）</span>
+        </div>
+        <div class="flex flex-col gap-1">${list || '<span class="text-[10px] text-gray-400">无主动赎回</span>'}</div>
+      </div>`;
 }
 
 function scExtraHtml(item) {
@@ -363,6 +429,8 @@ function simulateStrategy(item, pool) {
     const cashFlows = [], flowDates = [], assets = [], invests = [], cashDivs = [], peakPrincipal = [];
     const flows = [];   // 每日带符号净外部现金流（买入>0，赎回<0，不含分红），供时间加权净值(份额法)使用
     const stopGainEvents = [];   // 记录每次止盈触发的交易日下标
+    const activeRedeemEvents = [];   // 记录每次主动赎回触发的明细 { k, mode, proceeds, nav, holdShares }
+    let activeRedeemed = 0;      // 主动赎回到账累计金额
     const mdEventIdx = [];       // 记录每次成功"回撤加仓"的交易日下标（inv==='7'）
     const dcaEventIdx = [];      // 记录每次成功"普通定投"买入的交易日下标（inv 1/2/3/4/6）
     const holdAssets = [], holdCost = []; // 每日持仓市值 / 持仓成本（不含已落袋现金）
@@ -471,6 +539,31 @@ function simulateStrategy(item, pool) {
                 }
             }
         }
+        // 主动赎回（在买入前执行）：命中条目配置的赎回日期时，按比例(持仓%)/份额(份)/金额(元)赎回
+        if (item.activeRedeems && item.activeRedeems.length && shares > 0) {
+            for (const ev of item.activeRedeems) {
+                if (!ev || ev.date !== dateStrs[k]) continue;
+                let sellShares;
+                if (ev.mode === 'amount') {
+                    sellShares = Math.min(shares, (parseFloat(ev.value) || 0) / nav);   // 赎回指定金额对应份额，超持仓全赎
+                } else if (ev.mode === 'shares') {
+                    sellShares = Math.min(shares, parseFloat(ev.value) || 0);   // 赎回指定份额（份），超持仓全赎
+                } else {
+                    // 按比例：以「当前持仓份额」为基数（不受之前赎回影响，可直接按比例赎回）
+                    const ratio = Math.min(1, Math.max(0, (parseFloat(ev.value) || 0) / 100));
+                    sellShares = shares * ratio;
+                }
+                if (sellShares <= 0) continue;
+                const proceeds = sellShares * nav;
+                const holdShares = shares;   // 赎回时点持有份额（回测后回显）
+                const beforeShares = shares;
+                shares -= sellShares; totalCash += proceeds; totalRedeemed += proceeds; activeRedeemed += proceeds;
+                if (pool) pool.remaining += proceeds;   // 主动赎回到账回充资金池，可再投
+                cashFlows.push(proceeds); flowDates.push(date);
+                if (beforeShares > 0) costBasis *= shares / beforeShares;   // 按份额比例调减成本
+                activeRedeemEvents.push({ k, mode: ev.mode, proceeds, nav, holdShares });   // 记录本次主动赎回触发的交易日下标及明细
+            }
+        }
         let didInvest = 0;   // 实际成功买入的金额（资金池不足被跳过时为 0）
         if (amt !== 0) {
             if (amt > 0) {
@@ -521,7 +614,7 @@ function simulateStrategy(item, pool) {
     const netProfit = finalAsset - totalInvested;                 // = 总赎回+市值+累积现金分红−总定投
     const maxPrincipalReturn = maxPrincipal > 0 ? netProfit / maxPrincipal * 100 : 0;   // 收益率(峰值本金)
     const m = computeMetrics(dates, assets, invests);
-    return { item, dates, assets, invests, flows, cashDivs, holdAssets, holdCost, totalInvested, finalAsset, totalReturn, xirrVal, stopGainCount, maxPrincipal, maxPrincipalReturn, totalRedeemed, totalDividendCash, peakPrincipal, stopGainEvents, mdEventIdx, dcaEventIdx, firstInvestDate: dates[investIdx[0]], metrics: m };
+    return { item, dates, assets, invests, flows, cashDivs, holdAssets, holdCost, totalInvested, finalAsset, totalReturn, xirrVal, stopGainCount, maxPrincipal, maxPrincipalReturn, totalRedeemed, activeRedeemed, totalDividendCash, peakPrincipal, stopGainEvents, activeRedeemEvents, mdEventIdx, dcaEventIdx, firstInvestDate: dates[investIdx[0]], metrics: m };
 }
 
 function runStrategyCompare() {
@@ -627,6 +720,7 @@ function renderScResults(errors) {
             <td class="px-1.5 py-1.5 text-center text-xs whitespace-nowrap">${r.maxPrincipal.toFixed(0)}</td>
             <td class="px-1.5 py-1.5 text-center text-xs whitespace-nowrap sc-col-maxpr ${isSG ? (r.maxPrincipalReturn >= 0 ? 'text-emerald-600 font-medium' : 'text-rose-600 font-medium') : 'text-gray-400'}">${isSG ? r.maxPrincipalReturn.toFixed(2) + '%' : '—'}</td>
             <td class="px-1.5 py-1.5 text-center text-xs whitespace-nowrap">${r.totalRedeemed.toFixed(0)}</td>
+            <td class="px-1.5 py-1.5 text-center text-xs whitespace-nowrap">${(r.activeRedeemed || 0).toFixed(0)}</td>
             <td class="px-1.5 py-1.5 text-center text-xs whitespace-nowrap">${r.totalDividendCash.toFixed(0)}</td>
         </tr>`;
     });

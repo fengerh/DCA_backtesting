@@ -569,8 +569,29 @@ async function exportReportHTML() {
     else chartJsBlock = '<scr' + 'ipt src="' + CHART_JS_CDN + '"></scr' + 'ipt>';
 
     // 投资计划概览表（与回测结果一并导出，便于分享查看）
+    const planTypeText = function (type) {
+        if (type === 'single') return '单笔';
+        if (type === 'weekly') return '每周定投';
+        if (type === 'biweekly') return '每双周定投';
+        if (type === 'maxDrawdown') return '最大回撤投资';
+        return '每月定投';
+    };
+    // 止盈配置文本：模拟组合止盈为布尔开启 + 阈值/赎回比例
+    const planStopGainText = function (p) {
+        if (!p.stopGain) return '—';
+        return '目标止盈 ' + (p.stopGainPct != null ? p.stopGainPct : 0) + '% · 赎回 ' + (p.stopGainSellRatio != null ? p.stopGainSellRatio : 100) + '%';
+    };
+    // 主动赎回配置文本：列出每个事件的日期与方式
+    const planActiveRedeemText = function (p) {
+        const arr = p.activeRedeems || [];
+        if (arr.length === 0) return '—';
+        return arr.map(function (ev) {
+            const modeTxt = ev.mode === 'amount' ? ('按金额 ' + (ev.value != null ? ev.value : 0) + ' 元') : ('按比例 ' + (ev.value != null ? ev.value : 0) + '%');
+            return (ev.date || '') + ' ' + modeTxt;
+        }).join('<br>');
+    };
     const planRowsHtml = investmentPlans.map(function (p, i) {
-        const typeText = p.type === 'single' ? '单笔' : p.type === 'weekly' ? '每周定投' : '每月定投';
+        const typeText = planTypeText(p.type);
         const divText = p.div === 'reinvest' ? '红利再投资' : '现金分红';
         const cn = fundCodeName(p.fund);
         const periodText = p.type === 'single' ? p.startDate : (p.startDate + ' ~ ' + p.endDate);
@@ -589,6 +610,8 @@ async function exportReportHTML() {
             '<td class="px-3 py-2 border-b text-center">' + typeText + '</td>' +
             '<td class="px-3 py-2 border-b text-center">' + p.amount.toFixed(0) + ' 元</td>' +
             '<td class="px-3 py-2 border-b text-center ' + (p.div === 'reinvest' ? 'text-emerald-600 font-medium' : 'text-amber-600') + '">' + divText + '</td>' +
+            '<td class="px-3 py-2 border-b text-center ' + (p.stopGain ? 'text-amber-700' : 'text-gray-400') + '">' + planStopGainText(p) + '</td>' +
+            '<td class="px-3 py-2 border-b text-center ' + ((p.activeRedeems && p.activeRedeems.length) ? 'text-orange-700' : 'text-gray-400') + ' text-xs">' + planActiveRedeemText(p) + '</td>' +
             '<td class="px-3 py-2 border-b text-center font-mono text-xs">' + periodText + '</td>' +
             '<td class="px-3 py-2 border-b text-center text-xs text-gray-500">' + durText + '</td>' +
             '</tr>';
@@ -603,9 +626,81 @@ async function exportReportHTML() {
           '<th class="px-3 py-2 border-b text-center">投资方法</th>' +
           '<th class="px-3 py-2 border-b text-center">投资金额</th>' +
           '<th class="px-3 py-2 border-b text-center">分红方式</th>' +
+          '<th class="px-3 py-2 border-b text-center">止盈</th>' +
+          '<th class="px-3 py-2 border-b text-center">主动赎回</th>' +
           '<th class="px-3 py-2 border-b text-center">投资期限(起止)</th>' +
           '<th class="px-3 py-2 border-b text-center">投资年限</th>' +
           '</tr></thead><tbody>' + planRowsHtml + '</tbody></table></div>';
+
+    // 止盈 / 主动赎回执行明细（静态表格，按单基金列出每次触发日期、金额、净值、方式）
+    const sgDetailHtml = backtestResult.hasStopGainPlan
+        ? (function () {
+            const byFund = backtestResult.stopGainByFund || {};
+            const codes = Object.keys(byFund);
+            if (codes.length === 0) return '<p class="text-gray-500 text-sm">已启用目标止盈，但回测区间内未触发。</p>';
+            return '<div class="overflow-x-auto"><table class="min-w-full bg-white border border-gray-200 rounded-lg text-sm">' +
+                '<thead class="bg-gray-100"><tr>' +
+                '<th class="px-3 py-2 border-b text-center">基金</th>' +
+                '<th class="px-3 py-2 border-b text-center">触发日期</th>' +
+                '<th class="px-3 py-2 border-b text-center">赎回金额</th>' +
+                '<th class="px-3 py-2 border-b text-center">赎回比例</th>' +
+                '<th class="px-3 py-2 border-b text-center">净值</th>' +
+                '</tr></thead><tbody>' +
+                codes.map(function (code) {
+                    const cn = fundCodeName(code);
+                    const info = byFund[code];
+                    return info.events.map(function (e) {
+                        return '<tr class="hover:bg-gray-50">' +
+                            '<td class="px-3 py-2 border-b text-center font-medium text-xs">' + cn.code + ' ' + (cn.name || '') + '</td>' +
+                            '<td class="px-3 py-2 border-b text-center font-mono text-xs">' + e.dateStr + '</td>' +
+                            '<td class="px-3 py-2 border-b text-center text-amber-700">' + e.proceeds.toFixed(2) + ' 元</td>' +
+                            '<td class="px-3 py-2 border-b text-center">' + (e.ratio != null ? (e.ratio * 100).toFixed(0) + '%' : '—') + '</td>' +
+                            '<td class="px-3 py-2 border-b text-center font-mono text-xs">' + e.nav.toFixed(4) + '</td>' +
+                            '</tr>';
+                    }).join('');
+                }).join('') +
+                '</tbody></table></div>';
+        })()
+        : null;
+    const arDetailHtml = backtestResult.hasActiveRedeemPlan
+        ? (function () {
+            const byFund = backtestResult.activeRedeemByFund || {};
+            const codes = Object.keys(byFund);
+            if (codes.length === 0) return '<p class="text-gray-500 text-sm">已配置主动赎回，但回测区间内未触发。</p>';
+            return '<div class="overflow-x-auto"><table class="min-w-full bg-white border border-gray-200 rounded-lg text-sm">' +
+                '<thead class="bg-gray-100"><tr>' +
+                '<th class="px-3 py-2 border-b text-center">基金</th>' +
+                '<th class="px-3 py-2 border-b text-center">触发日期</th>' +
+                '<th class="px-3 py-2 border-b text-center">赎回金额</th>' +
+                '<th class="px-3 py-2 border-b text-center">赎回时持有份额</th>' +
+                '<th class="px-3 py-2 border-b text-center">方式</th>' +
+                '<th class="px-3 py-2 border-b text-center">净值</th>' +
+                '</tr></thead><tbody>' +
+                codes.map(function (code) {
+                    const cn = fundCodeName(code);
+                    const info = byFund[code];
+                    return info.events.map(function (e) {
+                        const modeTxt = e.mode === 'amount' ? '按金额' : (e.mode === 'shares' ? '按份额' : '按比例');
+                        const holdTxt = e.holdShares != null ? e.holdShares.toFixed(2) : '—';
+                        return '<tr class="hover:bg-gray-50">' +
+                            '<td class="px-3 py-2 border-b text-center font-medium text-xs">' + cn.code + ' ' + (cn.name || '') + '</td>' +
+                            '<td class="px-3 py-2 border-b text-center font-mono text-xs">' + e.dateStr + '</td>' +
+                            '<td class="px-3 py-2 border-b text-center text-orange-700">' + e.proceeds.toFixed(2) + ' 元</td>' +
+                            '<td class="px-3 py-2 border-b text-center font-mono text-xs">' + holdTxt + ' 份</td>' +
+                            '<td class="px-3 py-2 border-b text-center text-xs">' + modeTxt + '</td>' +
+                            '<td class="px-3 py-2 border-b text-center font-mono text-xs">' + e.nav.toFixed(4) + '</td>' +
+                            '</tr>';
+                    }).join('');
+                }).join('') +
+                '</tbody></table></div>';
+        })()
+        : null;
+    // 汇总两块执行明细为一个卡片（无止盈无主动赎回时整卡隐藏）
+    const redeemDetailHtml = (sgDetailHtml || arDetailHtml)
+        ? rptPlain('止盈 / 主动赎回执行明细',
+            (sgDetailHtml ? '<div class="mb-4"><div class="text-sm font-semibold text-amber-800 mb-2">目标止盈</div>' + sgDetailHtml + '</div>' : '') +
+            (arDetailHtml ? '<div><div class="text-sm font-semibold text-orange-700 mb-2">主动赎回</div>' + arDetailHtml + '</div>' : ''))
+        : '';
 
     const inner = '(' + buildReportInner.toString() + ')();';
 
@@ -645,6 +740,8 @@ async function exportReportHTML() {
         '        <h1 class="text-3xl font-bold text-center mb-8 text-gray-800">📊 基金组合回测报告</h1>\n' +
         // 投资计划概览（置顶，常开）
         rptPlain('投资计划概览', planTableHtml) + '\n' +
+        // 止盈 / 主动赎回执行明细（有触发时展示，静态表格）
+        (redeemDetailHtml ? redeemDetailHtml + '\n' : '') +
         // 回测指标（常开）
         '        <div class="bg-white p-6 rounded-xl shadow-md mb-6">\n' +
         '            <h3 class="text-lg font-semibold text-gray-700 mb-3">回测指标</h3>\n' +
@@ -709,12 +806,17 @@ async function exportScReportHTML() {
     const scRaw = {
         results: scResults.map(function (r, idx) {
             const cn = fundCodeName(r.item.fund);
+            // 止盈/主动赎回：事件仅存交易日下标，序列化下标数组 + 各条目累计金额
             return {
                 dates: r.dates.map(function (d) { return d.getTime(); }),
                 invests: r.invests || [],
                 assets: r.assets || [],
                 label: (cn.name || r.item.fund) + '·' + SC_STRATEGIES[r.item.strategy],
-                color: SC_COLORS[idx % SC_COLORS.length]
+                color: SC_COLORS[idx % SC_COLORS.length],
+                stopGainEvents: (r.stopGainEvents || []),
+                activeRedeemEvents: (r.activeRedeemEvents || []),
+                totalRedeemed: r.totalRedeemed || 0,
+                activeRedeemed: r.activeRedeemed || 0
             };
         })
     };
@@ -735,6 +837,42 @@ async function exportScReportHTML() {
     const errorsEl = document.getElementById('scErrors');
     const errorsHtml = errorsEl ? errorsEl.innerHTML : '';
     const dateStr = formatDate(new Date());
+
+    // 止盈 / 主动赎回执行明细（按条目列出触发日期列表 + 累计赎回金额）
+    const scHasRedeem = scResults.some(function (r) { return (r.stopGainEvents && r.stopGainEvents.length) || (r.activeRedeemEvents && r.activeRedeemEvents.length); });
+    const scRedeemDetailHtml = scHasRedeem
+        ? (function () {
+            const rows = scResults.map(function (r, idx) {
+                const cn = fundCodeName(r.item.fund);
+                const name = (cn.name || r.item.fund) + '·' + SC_STRATEGIES[r.item.strategy];
+                const sgDates = (r.stopGainEvents || []).map(function (i) { return formatDate(new Date(r.dates[i])); }).join('、');
+                const arDates = (r.activeRedeemEvents || []).map(function (ev) { return formatDate(new Date(r.dates[ev.k])); }).join('、');
+                const arHold = (r.activeRedeemEvents || []).map(function (ev) { return ev.holdShares != null ? ev.holdShares.toFixed(2) : '—'; }).join('、');
+                return '<tr class="hover:bg-gray-50">' +
+                    '<td class="px-3 py-2 border-b text-center font-medium text-xs">' + name + '</td>' +
+                    '<td class="px-3 py-2 border-b text-center text-xs">' + (sgDates || '—') + '</td>' +
+                    '<td class="px-3 py-2 border-b text-center text-amber-700">' + (r.totalRedeemed || 0).toFixed(0) + ' 元</td>' +
+                    '<td class="px-3 py-2 border-b text-center text-xs">' + (arDates || '—') + '</td>' +
+                    '<td class="px-3 py-2 border-b text-center text-xs">' + (arHold || '—') + ' 份</td>' +
+                    '<td class="px-3 py-2 border-b text-center text-orange-700">' + (r.activeRedeemed || 0).toFixed(0) + ' 元</td>' +
+                    '</tr>';
+            }).join('');
+            return '        <div class="bg-white p-6 rounded-xl shadow-md mb-6">\n' +
+                '            <h3 class="text-lg font-semibold text-gray-700 mb-3">止盈 / 主动赎回执行明细</h3>\n' +
+                '            <div class="overflow-x-auto"><table class="min-w-full bg-white border border-gray-200 rounded-lg text-sm">\n' +
+                '                <thead class="bg-gray-100"><tr>\n' +
+                '                    <th class="px-3 py-2 border-b text-center">条目</th>\n' +
+                '                    <th class="px-3 py-2 border-b text-center">止盈触发日期</th>\n' +
+                '                    <th class="px-3 py-2 border-b text-center">止盈累计金额</th>\n' +
+                '                    <th class="px-3 py-2 border-b text-center">主动赎回日期</th>\n' +
+                '                    <th class="px-3 py-2 border-b text-center">赎回时持有份额</th>\n' +
+                '                    <th class="px-3 py-2 border-b text-center">主动赎回累计金额</th>\n' +
+                '                </tr></thead>\n' +
+                '                <tbody>' + rows + '</tbody>\n' +
+                '            </table></div>\n' +
+                '        </div>\n';
+        })()
+        : '';
 
     const html = '<!DOCTYPE html>\n' +
         '<html lang="zh-CN">\n' +
@@ -762,6 +900,7 @@ async function exportScReportHTML() {
             '            <h3 class="text-lg font-semibold text-gray-700 mb-3">策略对比明细</h3>\n' +
             '            <div class="overflow-x-auto">' + tableHtml + '</div>\n' +
             '        </div>\n' : '') +
+        (scRedeemDetailHtml ? scRedeemDetailHtml : '') +
         (rulesHtml ? '        <div class="bg-white p-6 rounded-xl shadow-md mb-6">\n' +
             '            <h3 class="text-lg font-semibold text-gray-700 mb-3">策略规则说明</h3>\n' +
             rulesHtml + '\n' +
