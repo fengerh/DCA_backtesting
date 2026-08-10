@@ -26,13 +26,57 @@ function deserializeFunds(obj) {
     const out = {};
     for (const k in obj) {
         const f = obj[k];
+        // 年份边界控制：过滤非法年份（5 位及以上/越界 1900~当前年+2）的日期行，并同步过滤对应 nav/div
+        const dates = [], nav = [], div = [];
+        for (let i = 0; i < (f.dates || []).length; i++) {
+            const s = f.dates[i];
+            if (sanitizeDateInput(s) === null) continue;
+            dates.push(new Date(s + 'T00:00:00'));
+            nav.push(f.nav ? f.nav[i] : undefined);
+            div.push(f.div ? f.div[i] : undefined);
+        }
         out[k] = {
-            dates: f.dates.map(function (s) { return new Date(s + 'T00:00:00'); }),
-            nav: f.nav, div: f.div,
+            dates: dates,
+            nav: nav, div: div,
             minDate: f.minDate, maxDate: f.maxDate
         };
     }
     return out;
+}
+
+// 收集「指数估值比较」界面全部表单参数（单指数 + 双指数）
+function collectValuationState() {
+    const get = function (id) {
+        const el = document.getElementById(id);
+        return el ? el.value : '';
+    };
+    return {
+        // 单指数
+        valSingleIndex: get('valSingleIndex'),
+        valSingleStart: get('valSingleStart'),
+        valSingleEnd: get('valSingleEnd'),
+        valSingleShowStart: get('valSingleShowStart'),
+        valSingleShowEnd: get('valSingleShowEnd'),
+        valSingleRollYears1: get('valSingleRollYears1'),
+        valSingleRollYears2: get('valSingleRollYears2'),
+        valSingleRollYears3: get('valSingleRollYears3'),
+        valSingleMeanN: get('valSingleMeanN'),
+        valSingleHi: get('valSingleHi'),
+        valSingleLo: get('valSingleLo'),
+        // 双指数
+        valRatioA: get('valRatioA'),
+        valRatioB: get('valRatioB'),
+        valRatioStart: get('valRatioStart'),
+        valRatioEnd: get('valRatioEnd'),
+        valRatioMode: get('valRatioMode'),
+        valRatioN: get('valRatioN'),
+        valRatioRollYears1: get('valRatioRollYears1'),
+        valRatioRollYears2: get('valRatioRollYears2'),
+        valRatioShowStart: get('valRatioShowStart'),
+        valRatioShowEnd: get('valRatioShowEnd'),
+        valRatioHi: get('valRatioHi'),
+        valRatioLo: get('valRatioLo')
+    };
 }
 
 // 导出项目（打包全部基准）
@@ -47,7 +91,8 @@ async function exportProject() {
         compositeWeights: compositeWeights,
         fillMissingNav: fillMissingNav,
         currentBenchmarkId: currentBenchmarkId,
-        benchmarks: benchmarks
+        benchmarks: benchmarks,
+        valuationState: collectValuationState()
     };
     const blob = new Blob([JSON.stringify(snap, null, 2)], { type: 'application/json' });
     const url = URL.createObjectURL(blob);
@@ -86,10 +131,65 @@ async function importProject(file) {
         const pls = document.getElementById('planListSection'); if (pls) pls.style.display = 'block';
         // resultSection 在点击“启动回测”后才显示，导入时不提前展示
     }
+    // 年份边界控制：清洗导入计划中的非法日期（5 位及以上年份/越界）为空白，避免污染回测
+    investmentPlans.forEach(function (p) {
+        if (p.startDate && sanitizeDateInput(p.startDate) === null) p.startDate = '';
+        if (p.endDate && sanitizeDateInput(p.endDate) === null) p.endDate = '';
+        (p.activeRedeems || []).forEach(function (r) {
+            if (r.date && sanitizeDateInput(r.date) === null) r.date = '';
+        });
+    });
     renderPlanList();
     await loadBenchmarkList();
+
+    // 还原「指数估值比较」参数（基准 id 需经 idMap 重映射）
+    if (typeof snap.valuationState === 'object' && snap.valuationState) {
+        // 先重建估值下拉（填充当前基准选项），再写回保存的参数，避免被自动填充覆盖
+        if (typeof refreshValuationLists === 'function') refreshValuationLists();
+        restoreValuationState(snap.valuationState, idMap);
+    }
+
     if (investmentPlans.length > 0) runBacktest();
     alert('项目导入完成，已自动运行回测');
+}
+
+// 将保存的估值参数写回表单（指数 id 经 idMap 重映射），并恢复输入状态
+function restoreValuationState(vs, idMap) {
+    const remap = function (id) {
+        if (id == null || id === '') return id;
+        return (idMap && idMap[id] != null) ? String(idMap[id]) : String(id);
+    };
+    const set = function (id, val) {
+        const el = document.getElementById(id);
+        if (el && val != null) el.value = String(val);
+    };
+    // 单指数
+    set('valSingleIndex', remap(vs.valSingleIndex));
+    set('valSingleStart', vs.valSingleStart);
+    set('valSingleEnd', vs.valSingleEnd);
+    set('valSingleShowStart', vs.valSingleShowStart);
+    set('valSingleShowEnd', vs.valSingleShowEnd);
+    set('valSingleRollYears1', vs.valSingleRollYears1);
+    set('valSingleRollYears2', vs.valSingleRollYears2);
+    set('valSingleRollYears3', vs.valSingleRollYears3);
+    set('valSingleMeanN', vs.valSingleMeanN);
+    set('valSingleHi', vs.valSingleHi);
+    set('valSingleLo', vs.valSingleLo);
+    // 双指数
+    set('valRatioA', remap(vs.valRatioA));
+    set('valRatioB', remap(vs.valRatioB));
+    set('valRatioStart', vs.valRatioStart);
+    set('valRatioEnd', vs.valRatioEnd);
+    set('valRatioMode', vs.valRatioMode);
+    set('valRatioN', vs.valRatioN);
+    set('valRatioRollYears1', vs.valRatioRollYears1);
+    set('valRatioRollYears2', vs.valRatioRollYears2);
+    set('valRatioShowStart', vs.valRatioShowStart);
+    set('valRatioShowEnd', vs.valRatioShowEnd);
+    set('valRatioHi', vs.valRatioHi);
+    set('valRatioLo', vs.valRatioLo);
+    // 恢复 N 日输入框禁用态
+    if (typeof updateRatioModeInput === 'function') updateRatioModeInput();
 }
 
 // 报告内嵌脚本（在报告页内独立运行，复用主页算法）
@@ -503,8 +603,9 @@ function buildReportInner() {
 
 // 导出交互式 HTML 报告（Chart.js 内联，纯离线；Tailwind CDN；内嵌全部基准可切换）
 async function exportReportHTML() {
-    // 按当前模式分流：策略比较模式导出策略对比报告
+    // 按当前模式分流：策略比较导出策略对比报告；指数估值导出估值报告
     if (currentMode === 'sc') { await exportScReportHTML(); return; }
+    if (currentMode === 'valuation') { await exportValuationReportHTML(); return; }
     if (!backtestResult.dates || backtestResult.dates.length === 0) { alert('请先运行回测再导出报告'); return; }
     const reportData = {
         dates: backtestResult.dates.map(function (d) { return formatDate(d); }),
@@ -806,12 +907,20 @@ async function exportScReportHTML() {
     const scRaw = {
         results: scResults.map(function (r, idx) {
             const cn = fundCodeName(r.item.fund);
+            const sgLabel = r.item.stopGain !== 'none' ? '·' + SC_STOPGAIN[r.item.stopGain] : '';
             // 止盈/主动赎回：事件仅存交易日下标，序列化下标数组 + 各条目累计金额
             return {
                 dates: r.dates.map(function (d) { return d.getTime(); }),
                 invests: r.invests || [],
                 assets: r.assets || [],
-                label: (cn.name || r.item.fund) + '·' + SC_STRATEGIES[r.item.strategy],
+                flows: r.flows || [],
+                cashDivs: r.cashDivs || [],
+                peakPrincipal: r.peakPrincipal || [],
+                mdEventIdx: r.mdEventIdx || [],
+                dcaEventIdx: r.dcaEventIdx || [],
+                investStrategy: r.item.investStrategy,
+                stopGain: r.item.stopGain,
+                label: (cn.name || r.item.fund) + '·' + SC_INVEST[r.item.investStrategy] + sgLabel,
                 color: SC_COLORS[idx % SC_COLORS.length],
                 stopGainEvents: (r.stopGainEvents || []),
                 activeRedeemEvents: (r.activeRedeemEvents || []),
@@ -844,7 +953,8 @@ async function exportScReportHTML() {
         ? (function () {
             const rows = scResults.map(function (r, idx) {
                 const cn = fundCodeName(r.item.fund);
-                const name = (cn.name || r.item.fund) + '·' + SC_STRATEGIES[r.item.strategy];
+                const sgLabel = r.item.stopGain !== 'none' ? '·' + SC_STOPGAIN[r.item.stopGain] : '';
+                const name = (cn.name || r.item.fund) + '·' + SC_INVEST[r.item.investStrategy] + sgLabel;
                 const sgDates = (r.stopGainEvents || []).map(function (i) { return formatDate(new Date(r.dates[i])); }).join('、');
                 const arDates = (r.activeRedeemEvents || []).map(function (ev) { return formatDate(new Date(r.dates[ev.k])); }).join('、');
                 const arHold = (r.activeRedeemEvents || []).map(function (ev) { return ev.holdShares != null ? ev.holdShares.toFixed(2) : '—'; }).join('、');
@@ -892,9 +1002,35 @@ async function exportScReportHTML() {
             '            <div class="grid grid-cols-2 md:grid-cols-4 gap-4">' + metricsHtml + '</div>\n' +
             '        </div>\n' : '') +
         '        <div class="bg-white p-6 rounded-xl shadow-md mb-6">\n' +
-        '            <h3 class="text-lg font-semibold text-gray-700 mb-3">投资净值曲线（资金加权，起点=1.0）</h3>\n' +
+        '            <h3 class="text-lg font-semibold mb-3 text-gray-700 flex items-center justify-between flex-wrap gap-2">\n' +
+        '                <span id="scChartTitle">投资净值曲线（资金加权，起点=1.0）</span>\n' +
+        '                <span class="inline-flex flex-row gap-2 items-center justify-end">\n' +
+        '                    <span class="inline-flex rounded-lg border border-gray-300 overflow-hidden text-sm">\n' +
+        '                        <button onclick="__setXMode(\'month\')" id="scXMonth" class="px-3 py-1.5 bg-white text-gray-700 hover:bg-gray-100">按持有期月数对齐</button>\n' +
+        '                        <button onclick="__setXMode(\'date\')" id="scXDate" class="px-3 py-1.5 bg-blue-600 text-white">按日期</button>\n' +
+        '                    </span>\n' +
+        '                </span>\n' +
+        '            </h3>\n' +
+        '            <div class="flex items-center justify-end gap-2 mb-3">\n' +
+        '                <span class="inline-flex justify-end min-w-[440px]">\n' +
+        '                    <span id="scNetToggle" class="inline-flex rounded-lg border border-gray-300 overflow-hidden text-sm">\n' +
+        '                        <button onclick="__setNetMode(\'mw\')" id="scNetMw" class="px-3 py-1.5 min-w-[84px] bg-blue-600 text-white">资金加权</button>\n' +
+        '                        <button onclick="__setNetMode(\'portfolio\')" id="scNetPf" class="px-3 py-1.5 min-w-[84px] bg-white text-gray-700 hover:bg-gray-100">时间加权净值</button>\n' +
+        '                    </span>\n' +
+        '                    <span id="scXirrWindowGroup" class="inline-flex rounded-lg border border-gray-300 overflow-hidden text-sm" style="display:none;" title="可多选叠加：累计 / 1年 / 3年 / 5年滚动 XIRR">\n' +
+        '                        <button onclick="__toggleWin(\'cum\')" id="scXirrCum" class="px-3 py-1.5 min-w-[84px] bg-blue-600 text-white">累计</button>\n' +
+        '                        <button onclick="__toggleWin(\'y1\')" id="scXirrY1" class="px-3 py-1.5 min-w-[84px] bg-white text-gray-700 hover:bg-gray-100">1年滚动</button>\n' +
+        '                        <button onclick="__toggleWin(\'y3\')" id="scXirrY3" class="px-3 py-1.5 min-w-[84px] bg-white text-gray-700 hover:bg-gray-100">3年滚动</button>\n' +
+        '                        <button onclick="__toggleWin(\'y5\')" id="scXirrY5" class="px-3 py-1.5 min-w-[84px] bg-white text-gray-700 hover:bg-gray-100">5年滚动</button>\n' +
+        '                    </span>\n' +
+        '                </span>\n' +
+        '                <span class="inline-flex rounded-lg border border-gray-300 overflow-hidden text-sm">\n' +
+        '                    <button onclick="__setYMode(\'net\')" id="scYNet" class="px-3 py-1.5 bg-blue-600 text-white">净值</button>\n' +
+        '                    <button onclick="__setYMode(\'xirr\')" id="scYXirr" class="px-3 py-1.5 bg-white text-gray-700 hover:bg-gray-100">XIRR年化</button>\n' +
+        '                </span>\n' +
+        '            </div>\n' +
         '            <div style="height: 420px;"><canvas id="scChartExport"></canvas></div>\n' +
-        '            <p class="text-xs text-gray-500 mt-2">* 采用资金加权的"这一笔投资净值"（起点=1.0）：当日净值 = 当日总资产 ÷ 截至当日的累计已投入本金。x 轴为各条目的持有期（月）。</p>\n' +
+        '            <p class="text-xs text-gray-500 mt-2" id="scChartNote">* 采用资金加权的"这一笔投资净值"（起点=1.0）：当日净值 = 当日总资产 ÷ 截至当日的累计已投入本金。</p>\n' +
         '        </div>\n' +
         (tableHtml ? '        <div class="bg-white p-6 rounded-xl shadow-md mb-6">\n' +
             '            <h3 class="text-lg font-semibold text-gray-700 mb-3">策略对比明细</h3>\n' +
@@ -915,45 +1051,306 @@ async function exportScReportHTML() {
         '    <scr' + 'ipt>\n' +
         '        var __sc = window.__sc__;\n' +
         '        var __chart = null;\n' +
+        '        var __xMode = "date";            // month | date\n' +
+        '        var __netMode = "mw";           // mw 资金加权 | portfolio 时间加权净值\n' +
+        '        var __yMode = "net";            // net | xirr\n' +
+        '        var __wins = ["cum"];           // XIRR 勾选窗口\n' +
+        '        var __WINDOWS = [\n' +
+        '            { key: "cum", label: "累计", years: null, dash: [], alpha: 1.0 },\n' +
+        '            { key: "y1", label: "1年", years: 1, dash: [2, 2], alpha: 0.9 },\n' +
+        '            { key: "y3", label: "3年", years: 3, dash: [6, 3], alpha: 0.8 },\n' +
+        '            { key: "y5", label: "5年", years: 5, dash: [10, 4], alpha: 0.7 }\n' +
+        '        ];\n' +
+        '        var __CLAMP_MIN = -100, __CLAMP_MAX = 100;\n' +
         '        function __fmt(d) { var t = new Date(d); if (isNaN(t)) return d; var y = t.getFullYear(); var m = ("0" + (t.getMonth() + 1)).slice(-2); var day = ("0" + t.getDate()).slice(-2); return y + "-" + m + "-" + day; }\n' +
-        '        function __build() {\n' +
-        '            var ds = [];\n' +
-        '            __sc.results.forEach(function (r) {\n' +
-        '                var startTs = r.dates[0]; var cum = 0;\n' +
-        '                var pts = [];\n' +
-        '                r.dates.forEach(function (ts, i) {\n' +
-        '                    cum += (r.invests[i] || 0);\n' +
-        '                    var months = (ts - startTs) / (1000 * 60 * 60 * 24 * 30.4375);\n' +
-        '                    var nv = cum > 0 ? r.assets[i] / cum : null;\n' +
-        '                    if (nv == null) return;\n' +
-        '                    pts.push({ x: +months.toFixed(2), y: +nv.toFixed(4) });\n' +
-        '                });\n' +
-        '                ds.push({ label: r.label, data: pts, borderColor: r.color, backgroundColor: r.color, borderWidth: 2, pointRadius: 0, tension: 0.1, fill: false });\n' +
+        '        function __hexToRgba(hex, alpha) { var h = (hex || "#000000").replace("#", ""); var r = parseInt(h.substring(0, 2), 16), g = parseInt(h.substring(2, 4), 16), b = parseInt(h.substring(4, 6), 16); return "rgba(" + r + "," + g + "," + b + "," + alpha + ")"; }\n' +
+        '        // 时间加权净值（份额法/TWR）：与主工具口径一致\n' +
+        '        function __portfolioNetValues(assets, flows) {\n' +
+        '            var nv = [];\n' +
+        '            for (var i = 0; i < assets.length; i++) {\n' +
+        '                if (i === 0) { nv.push(assets[i] > 0 ? 1.0 : null); continue; }\n' +
+        '                var prev = assets[i - 1];\n' +
+        '                if (prev > 0) nv.push((nv[i - 1] == null ? 1.0 : nv[i - 1]) * ((assets[i] - (flows[i] || 0)) / prev));\n' +
+        '                else nv.push(assets[i] > 0 ? 1.0 : null);\n' +
+        '            }\n' +
+        '            return nv;\n' +
+        '        }\n' +
+        '        // 逐日资金加权收益率（XIRR 年化，%），与主工具 rollingXirr 同口径\n' +
+        '        function __rollingXirr(r, years) {\n' +
+        '            var N = r.dates.length;\n' +
+        '            var out = new Array(N).fill(null);\n' +
+        '            if (N < 2) return out;\n' +
+        '            var inv = r.invests || [], cashDivs = r.cashDivs || [], assets = r.assets || [];\n' +
+        '            var netFlow = new Array(N), holdVal = new Array(N);\n' +
+        '            var prevCash = 0;\n' +
+        '            for (var j = 0; j < N; j++) {\n' +
+        '                var realized = cashDivs[j] - prevCash; prevCash = cashDivs[j];\n' +
+        '                netFlow[j] = -(inv[j] || 0) + (realized > 0 ? realized : 0);\n' +
+        '                holdVal[j] = assets[j] - cashDivs[j];\n' +
+        '            }\n' +
+        '            var YEAR_MS = 1000 * 60 * 60 * 24 * 365;\n' +
+        '            var ts = r.dates;\n' +
+        '            var winStart = new Array(N).fill(0);\n' +
+        '            if (years != null) {\n' +
+        '                var s = 0;\n' +
+        '                for (var i = 0; i < N; i++) {\n' +
+        '                    var cut = new Date(r.dates[i]); cut.setFullYear(cut.getFullYear() - years);\n' +
+        '                    var cutTs = cut.getTime();\n' +
+        '                    while (s < i && ts[s] < cutTs) s++;\n' +
+        '                    winStart[i] = s;\n' +
+        '                }\n' +
+        '            }\n' +
+        '            var openVal = function (i) { var si = winStart[i]; return si > 0 ? holdVal[si - 1] : 0; };\n' +
+        '            var npv = function (rate, i) {\n' +
+        '                var si = winStart[i], base = ts[si];\n' +
+        '                var frac = function (jj) { return (ts[jj] - base) / YEAR_MS; };\n' +
+        '                var sum = -openVal(i);\n' +
+        '                for (var j = si; j <= i; j++) sum += netFlow[j] / Math.pow(1 + rate, frac(j));\n' +
+        '                return sum + holdVal[i] / Math.pow(1 + rate, frac(i));\n' +
+        '            };\n' +
+        '            var npvDeriv = function (rate, i) {\n' +
+        '                var si = winStart[i], base = ts[si];\n' +
+        '                var frac = function (jj) { return (ts[jj] - base) / YEAR_MS; };\n' +
+        '                var d = 0;\n' +
+        '                for (var j = si; j <= i; j++) d -= netFlow[j] * frac(j) / Math.pow(1 + rate, frac(j) + 1);\n' +
+        '                d -= holdVal[i] * frac(i) / Math.pow(1 + rate, frac(i) + 1);\n' +
+        '                return d;\n' +
+        '            };\n' +
+        '            var prevRate = 0.1, cumInvest = inv[0] || 0;\n' +
+        '            for (var i = 1; i < N; i++) {\n' +
+        '                cumInvest += (inv[i] || 0);\n' +
+        '                if (cumInvest <= 0) continue;\n' +
+        '                if (years != null) {\n' +
+        '                    var si = winStart[i];\n' +
+        '                    if (si >= i) continue;\n' +
+        '                    var winInv = 0;\n' +
+        '                    for (var jj = si; jj <= i; jj++) winInv += (inv[jj] || 0);\n' +
+        '                    if (openVal(i) <= 0 && winInv <= 0) continue;\n' +
+        '                }\n' +
+        '                var tol = 1e-7, rate = prevRate, ok = false;\n' +
+        '                for (var it = 0; it < 60; it++) {\n' +
+        '                    var v = npv(rate, i), dv = npvDeriv(rate, i);\n' +
+        '                    if (Math.abs(v) < tol) { ok = true; break; }\n' +
+        '                    if (Math.abs(dv) < tol) break;\n' +
+        '                    rate -= v / dv;\n' +
+        '                    if (rate <= -0.9999) rate = -0.9999 + 1e-6;\n' +
+        '                    if (!isFinite(rate)) break;\n' +
+        '                }\n' +
+        '                if (!ok) {\n' +
+        '                    var lo = -0.9999, hi = 100, fLo = npv(lo, i), fHi = npv(hi, i);\n' +
+        '                    if (fLo * fHi <= 0) {\n' +
+        '                        for (var it2 = 0; it2 < 100; it2++) {\n' +
+        '                            var mid = (lo + hi) / 2, fM = npv(mid, i);\n' +
+        '                            if (Math.abs(fM) < tol) { rate = mid; ok = true; break; }\n' +
+        '                            if (fLo * fM < 0) { hi = mid; } else { lo = mid; }\n' +
+        '                        }\n' +
+        '                        if (!ok) rate = (lo + hi) / 2;\n' +
+        '                    } else rate = null;\n' +
+        '                }\n' +
+        '                out[i] = (rate == null || !isFinite(rate)) ? null : Math.max(__CLAMP_MIN, Math.min(__CLAMP_MAX, rate * 100));\n' +
+        '                if (out[i] != null) prevRate = rate;\n' +
+        '            }\n' +
+        '            return out;\n' +
+        '        }\n' +
+        '        function __scXirrSeries(r, key) {\n' +
+        '            var w = null;\n' +
+        '            for (var i = 0; i < __WINDOWS.length; i++) if (__WINDOWS[i].key === key) { w = __WINDOWS[i]; break; }\n' +
+        '            if (!w) w = __WINDOWS[0];\n' +
+        '            if (!r.__xirr) r.__xirr = {};\n' +
+        '            if (!r.__xirr[key]) r.__xirr[key] = __rollingXirr(r, w.years);\n' +
+        '            return r.__xirr[key];\n' +
+        '        }\n' +
+        '        // 按日期模式：生成规律化刻度，对齐到各周期的起始日（1月1日 / 4月1日 / 7月1日 / 10月1日 / 月初等）\n' +
+        '        function __dateTickInfo(xMin, xMax) {\n' +
+        '            if (!(xMin != null && xMax != null && isFinite(xMin) && isFinite(xMax) && xMax > xMin)) return { ticks: [], unit: "month" };\n' +
+        '            var YEAR = 365.2425 * 24 * 60 * 60 * 1000;\n' +
+        '            var spanYears = (xMax - xMin) / YEAR;\n' +
+        '            var unit, stepMonths;\n' +
+        '            if (spanYears < 0.75) { unit = "month"; stepMonths = 1; }\n' +
+        '            else if (spanYears <= 2) { unit = "quarter"; stepMonths = 3; }\n' +
+        '            else if (spanYears <= 5) { unit = "half"; stepMonths = 6; }\n' +
+        '            else if (spanYears <= 12) { unit = "year"; stepMonths = 12; }\n' +
+        '            else { unit = "multiYear"; stepMonths = spanYears > 24 ? 60 : 24; }\n' +
+        '            var start = new Date(xMin);\n' +
+        '            var y = start.getFullYear(), m = start.getMonth();\n' +
+        '            if (unit !== "month") {\n' +
+        '                // 对齐到各周期的起始月：year/multiYear→1月(0)；half→1月(0)或7月(6)；quarter→1/4/7/10月\n' +
+        '                var alignMonth;\n' +
+        '                if (unit === "year" || unit === "multiYear") alignMonth = 0;\n' +
+        '                else if (unit === "half") alignMonth = (m < 6) ? 0 : 6;\n' +
+        '                else alignMonth = Math.floor(m / 3) * 3;\n' +
+        '                // 若该起始日早于 xMin 则顺延一个 step\n' +
+        '                if (new Date(y, alignMonth, 1).getTime() < xMin) { m = alignMonth + stepMonths; while (m > 11) { m -= 12; y += 1; } }\n' +
+        '                else { m = alignMonth; }\n' +
+        '            }\n' +
+        '            var ticks = [];\n' +
+        '            for (var i = 0; i < 2000; i++) {\n' +
+        '                var t = new Date(y, m, 1).getTime();\n' +
+        '                if (t > xMax) break;\n' +
+        '                if (t >= xMin) ticks.push(t);\n' +
+        '                m += stepMonths; while (m > 11) { m -= 12; y += 1; }\n' +
+        '            }\n' +
+        '            if (ticks.length < 2) {\n' +
+        '                var res = [];\n' +
+        '                var dd = new Date(xMin);\n' +
+        '                for (var j = 0; j < 12; j++) { var tt = new Date(dd.getFullYear(), dd.getMonth() + j, 1).getTime(); if (tt > xMax) break; if (tt >= xMin) res.push(tt); }\n' +
+        '                return { ticks: res, unit: "month" };\n' +
+        '            }\n' +
+        '            return { ticks: ticks, unit: unit };\n' +
+        '        }\n' +
+        '        function __fmtDateTick(ts, unit) {\n' +
+        '            var d = new Date(ts);\n' +
+        '            var y = d.getFullYear(), m = d.getMonth();\n' +
+        '            if (unit === "year" || unit === "multiYear") return String(y);\n' +
+        '            if (unit === "half") return m === 0 ? y + "H1" : y + "H2";\n' +
+        '            if (unit === "quarter") return y + "Q" + (Math.floor(m / 3) + 1);\n' +
+        '            return y + "-" + String(m + 1).padStart(2, "0");\n' +
+        '        }\n' +
+        '        function __btnOn(id) { var el = document.getElementById(id); if (el) el.className = "px-3 py-1.5 min-w-[84px] bg-blue-600 text-white"; }\n' +
+        '        function __btnOff(id) { var el = document.getElementById(id); if (el) el.className = "px-3 py-1.5 min-w-[84px] bg-white text-gray-700 hover:bg-gray-100"; }\n' +
+        '        function __btnXOn(id) { var el = document.getElementById(id); if (el) el.className = "px-3 py-1.5 bg-blue-600 text-white"; }\n' +
+        '        function __btnXOff(id) { var el = document.getElementById(id); if (el) el.className = "px-3 py-1.5 bg-white text-gray-700 hover:bg-gray-100"; }\n' +
+        '        function __syncBtns() {\n' +
+        '            if (__xMode === "date") { __btnXOn("scXDate"); __btnXOff("scXMonth"); } else { __btnXOn("scXMonth"); __btnXOff("scXDate"); }\n' +
+        '            if (__netMode === "mw") { __btnOn("scNetMw"); __btnOff("scNetPf"); } else { __btnOn("scNetPf"); __btnOff("scNetMw"); }\n' +
+        '            if (__yMode === "net") { __btnOn("scYNet"); __btnOff("scYXirr"); } else { __btnOn("scYXirr"); __btnOff("scYNet"); }\n' +
+        '            var sg = document.getElementById("scXirrWindowGroup"), nt = document.getElementById("scNetToggle");\n' +
+        '            if (sg) sg.style.display = __yMode === "xirr" ? "" : "none";\n' +
+        '            if (nt) nt.style.display = __yMode === "net" ? "" : "none";\n' +
+        '            __WINDOWS.forEach(function (w) {\n' +
+        '                if (__wins.indexOf(w.key) !== -1) __btnOn("scXirr" + w.key.charAt(0).toUpperCase() + w.key.slice(1));\n' +
+        '                else __btnOff("scXirr" + w.key.charAt(0).toUpperCase() + w.key.slice(1));\n' +
         '            });\n' +
-        '            return ds;\n' +
+        '        }\n' +
+        '        function __activeWins() {\n' +
+        '            var out = [];\n' +
+        '            for (var i = 0; i < __WINDOWS.length; i++) if (__wins.indexOf(__WINDOWS[i].key) !== -1) out.push(__WINDOWS[i]);\n' +
+        '            return out;\n' +
+        '        }\n' +
+        '        function __build() {\n' +
+        '            var ds = [], isXirr = __yMode === "xirr", activeWins = isXirr ? __activeWins() : [null];\n' +
+        '            var hasStopGain = __sc.results.some(function (x) { return x.stopGain && x.stopGain !== "none"; });\n' +
+        '            __sc.results.forEach(function (r) {\n' +
+        '                var startTs = r.dates[0];\n' +
+        '                var inv = r.invests || [], assets = r.assets || [], flows = r.flows || [], cashDivs = r.cashDivs || [];\n' +
+        '                var isStopGain = r.stopGain && r.stopGain !== "none";\n' +
+        '                var sgSet = isStopGain && r.stopGainEvents ? new Set(r.stopGainEvents) : null;\n' +
+        '                var mdSet = (r.investStrategy === "7" && r.mdEventIdx) ? new Set(r.mdEventIdx) : null;\n' +
+        '                var dcaSet = (r.investStrategy !== "7" && r.dcaEventIdx) ? new Set(r.dcaEventIdx) : null;\n' +
+        '                var pnvArr = (__netMode === "portfolio") ? __portfolioNetValues(assets, flows) : null;\n' +
+        '                var color = r.color;\n' +
+        '                var cnName = r.label.split("·")[0];\n' +
+        '                activeWins.forEach(function (win, wi) {\n' +
+        '                    var wantSg = wi === 0;\n' +
+        '                    var rx = isXirr ? __scXirrSeries(r, win.key) : null;\n' +
+        '                    var cum = 0, pts = [], sgPts = [], mdPts = [], dcaPts = [];\n' +
+        '                    r.dates.forEach(function (ts, i) {\n' +
+        '                        cum += (inv[i] || 0);\n' +
+        '                        var months = (ts - startTs) / (1000 * 60 * 60 * 24 * 30.4375);\n' +
+        '                        var yVal;\n' +
+        '                        if (isXirr) { var v = rx[i]; if (v == null) return; yVal = +v.toFixed(2); }\n' +
+        '                        else {\n' +
+        '                            var nv;\n' +
+        '                            if (__netMode === "portfolio") { nv = pnvArr ? pnvArr[i] : null; }\n' +
+        '                            else if (isStopGain) { var peak = (r.peakPrincipal || [])[i]; nv = peak > 0 ? 1 + (assets[i] - cum) / peak : null; }\n' +
+        '                            else { nv = cum > 0 ? assets[i] / cum : null; }\n' +
+        '                            if (nv == null) return; yVal = +nv.toFixed(4);\n' +
+        '                        }\n' +
+        '                        var xVal = __xMode === "date" ? ts : +months.toFixed(2);\n' +
+        '                        pts.push({ x: xVal, y: yVal });\n' +
+        '                        if (wantSg && sgSet && sgSet.has(i)) sgPts.push({ x: xVal, y: yVal });\n' +
+        '                        if (wantSg && mdSet && mdSet.has(i)) mdPts.push({ x: xVal, y: yVal });\n' +
+        '                        if (wantSg && dcaSet && dcaSet.has(i)) dcaPts.push({ x: xVal, y: yVal });\n' +
+        '                    });\n' +
+        '                    var lineColor = isXirr && win.alpha < 1 ? __hexToRgba(color, win.alpha) : color;\n' +
+        '                    var baseLabel = r.label.split("·").length > 1 ? r.label : r.label;\n' +
+        '                    ds.push({ label: isXirr && activeWins.length > 1 ? baseLabel + "·" + win.label : baseLabel, data: pts, borderColor: lineColor, backgroundColor: lineColor, borderDash: isXirr ? win.dash : [], borderWidth: 2, pointRadius: 0, tension: 0.1, fill: false });\n' +
+        '                    if (sgPts.length) ds.push({ label: cnName + "·止盈点", data: sgPts, borderColor: color, backgroundColor: color, pointStyle: "circle", pointRadius: 4, pointHoverRadius: 6, pointBorderColor: "#ffffff", pointBorderWidth: 1.5, showLine: false, fill: false, isStopGainMarker: true });\n' +
+        '                    if (mdPts.length) ds.push({ label: cnName + "·回撤加仓", data: mdPts, borderColor: "#2563eb", backgroundColor: "#2563eb", pointStyle: "triangle", pointRadius: 7, pointHoverRadius: 9, showLine: false, fill: false, isMdMarker: true });\n' +
+        '                    if (dcaPts.length) ds.push({ label: cnName + "·普通定投", data: dcaPts, borderColor: "#8b5cf6", backgroundColor: "#8b5cf6", pointStyle: "circle", pointRadius: 3, pointHoverRadius: 5, showLine: false, fill: false, isDcaMarker: true });\n' +
+        '                });\n' +
+        '            });\n' +
+        '            return { ds: ds, isXirr: isXirr, activeWins: activeWins, hasStopGain: hasStopGain };\n' +
+        '        }\n' +
+'        function __showError(msg) {\n' +
+        '            try { var c = document.getElementById("scChartExport"); if (c && c.parentNode) c.parentNode.innerHTML = \'<p class="text-rose-600 text-sm">图表渲染失败：\' + msg + \'</p>\'; } catch(e2) {}\n' +
         '        }\n' +
         '        function __render() {\n' +
-        '            var ds = __build();\n' +
+        '            try {\n' +
+        '            var built = __build(), ds = built.ds;\n' +
         '            var xMin = Infinity, xMax = -Infinity;\n' +
         '            ds.forEach(function (d) { d.data.forEach(function (p) { if (p.x != null && isFinite(p.x)) { if (p.x < xMin) xMin = p.x; if (p.x > xMax) xMax = p.x; } }); });\n' +
         '            if (!isFinite(xMin)) { xMin = undefined; xMax = undefined; }\n' +
-        '            if (__chart) __chart.destroy();\n' +
-        '            var ctx = document.getElementById("scChartExport").getContext("2d");\n' +
+        '            var tickInfo = (__xMode === "date" && xMin != null) ? __dateTickInfo(xMin, xMax) : null;\n' +
+        '            if (__chart) { try { __chart.destroy(); } catch(e) {} __chart = null; }\n' +
+        '            var canvasEl = document.getElementById("scChartExport");\n' +
+        '            if (!canvasEl) { __showError("找不到 canvas 元素"); return; }\n' +
+        '            var ctx = canvasEl.getContext("2d");\n' +
+        '            var yTitle = built.isXirr\n' +
+        '                ? "资金加权收益率 XIRR 年化（%）· " + built.activeWins.map(function (w) { return w.label; }).join(" / ")\n' +
+        '                : (__netMode === "portfolio"\n' +
+        '                    ? "时间加权净值（份额法：总资产÷总份额，起点=1.0）"\n' +
+        '                    : (built.hasStopGain\n' +
+        '                        ? "投资净值（普通策略=总资产/累计投入；止盈策略=1+最大本金收益率，起点=1.0）"\n' +
+        '                        : "投资净值（资金加权，总资产/累计投入，起点=1.0）"));\n' +
         '            __chart = new Chart(ctx, {\n' +
         '                type: "line", data: { datasets: ds }, options: {\n' +
         '                    responsive: true, maintainAspectRatio: false,\n' +
         '                    interaction: { mode: "nearest", intersect: false },\n' +
         '                    scales: {\n' +
         '                        x: { type: "linear", min: xMin, max: xMax,\n' +
-        '                            title: { display: true, text: "持有期（月）" },\n' +
-        '                            ticks: { maxTicksLimit: 12, callback: function (v) { return v + "月"; } } },\n' +
-        '                        y: { title: { display: true, text: "归一化总资产（起点=1.0）" } }\n' +
+        '                            title: { display: true, text: __xMode === "date" ? "日期" : "持有期（月）" },\n' +
+'                            ticks: __xMode === "date"\n' +
+'                                ? { autoSkip: false, callback: function (v) {\n' +
+'                                      var t = tickInfo && tickInfo.ticks.indexOf(+v.toFixed(0)) !== -1 ? +v.toFixed(0) : null;\n' +
+'                                      return t != null ? __fmtDateTick(t, tickInfo.unit) : "";\n' +
+'                                  } }\n' +
+'                                : { maxTicksLimit: 12, callback: function (v) { return v + "月"; } },\n' +
+'                            afterBuildTicks: __xMode === "date" ? function (axis) {\n' +
+'                                if (tickInfo && tickInfo.ticks.length) axis.ticks = tickInfo.ticks.map(function (v) { return { value: v }; });\n' +
+'                            } : undefined\n' +
+'                        },\n' +
+'                        y: { title: { display: true, text: yTitle } }\n' +
         '                    },\n' +
-        '                    plugins: { legend: { position: "bottom" } }\n' +
-        '                }\n' +
-        '            });\n' +
-        '        }\n' +
-        '        __render();\n' +
+        '                    plugins: {\n' +
+        '                        legend: { position: "bottom" },\n' +
+        '                        tooltip: { callbacks: {\n' +
+        '                            title: function (items) { return items.length ? (__xMode === "date" ? __fmt(items[0].parsed.x) : (items[0].parsed.x + " 月")) : ""; },\n' +
+        '                            label: function (item) {\n' +
+        '                                if (item.dataset && item.dataset.isStopGainMarker) return item.dataset.label;\n' +
+        '                                if (item.dataset && item.dataset.isMdMarker) return item.dataset.label;\n' +
+'                                if (item.dataset && item.dataset.isDcaMarker) return item.dataset.label;\n' +
+'                                return built.isXirr ? item.dataset.label + "：" + item.parsed.y.toFixed(2) + "%" : item.parsed.y.toFixed(4);\n' +
+'                            }\n' +
+'                        } }\n' +
+'                    }\n' +
+'                }\n' +
+'            });\n' +
+'            var title = document.getElementById("scChartTitle");\n' +
+'            if (title) title.textContent = built.isXirr\n' +
+'                ? "投资收益率曲线（资金加权 XIRR 年化，%）· " + built.activeWins.map(function (w) { return w.label; }).join(" / ")\n' +
+'                : "投资净值曲线（资金加权，起点=1.0）";\n' +
+'            var note = document.getElementById("scChartNote");\n' +
+'            if (note) note.textContent = built.isXirr\n' +
+'                ? "* 资金加权 XIRR 年化：每日净外部现金流 = −当日投入 + 当日落袋现金；期末只计剩余持仓市值。曲线限幅 ±100%。可切换按持有期月数对齐/按日期。"\n' +
+'                : (__netMode === "portfolio"\n' +
+'                    ? "* 时间加权净值（份额法）：新投入按当时时间加权净值折算份额，加仓只增份额、不改变净值。可切换按持有期月数对齐/按日期。"\n' +
+'                    : "* 资金加权净值（起点=1.0）：当日净值 = 当日总资产 ÷ 截至当日的累计已投入本金。可切换按持有期月数对齐/按日期。");\n' +
+'            __syncBtns();\n' +
+'            } catch (err) { __showError(err && err.message ? err.message : String(err)); }\n' +
+'        }\n' +
+'        function __setXMode(mode) { try { __xMode = mode; __render(); } catch(e) { __showError(e.message); } }\n' +
+'        function __setNetMode(mode) { try { __netMode = mode; __render(); } catch(e) { __showError(e.message); } }\n' +
+'        function __setYMode(mode) { try { __yMode = mode; __render(); } catch(e) { __showError(e.message); } }\n' +
+'        function __toggleWin(key) {\n' +
+'            try {\n' +
+'            var idx = __wins.indexOf(key);\n' +
+'            if (idx !== -1) __wins.splice(idx, 1); else __wins.push(key);\n' +
+'            if (__wins.length === 0) __wins.push("cum");\n' +
+'            __render();\n' +
+'            } catch(e) { __showError(e.message); }\n' +
+'        }\n' +
+'        try { __render(); } catch(e) { __showError(e.message); }\n' +
         '    </scr' + 'ipt>\n' +
         '</body>\n' +
         '</html>';
@@ -965,6 +1362,320 @@ async function exportScReportHTML() {
     a.download = '策略比较报告_' + dateStr + '.html';
     document.body.appendChild(a); a.click(); a.remove();
     URL.revokeObjectURL(url);
+}
+
+// 导出「指数估值比较」HTML 报告（单指数点位图 + 双指数比值图，Chart.js 内联，纯离线）
+async function exportValuationReportHTML() {
+    const benchmarksAll = await db.benchmarks.toArray();
+    if (benchmarksAll.length === 0) { alert('无基准数据，无法导出估值报告'); return; }
+    const benchmarksData = benchmarksAll.map(function (b) { return { id: b.id, name: b.name, data: b.data }; });
+    const vs = collectValuationState();
+    const dateStr = formatDate(new Date());
+
+    // 内联 Chart.js（优先内联，失败则外链 CDN）
+    let chartJsSrc = '';
+    try { chartJsSrc = await (await fetch(CHART_JS_CDN)).text(); } catch (e) { chartJsSrc = ''; }
+    let chartJsBlock;
+    if (chartJsSrc) chartJsBlock = '<scr' + 'ipt>' + chartJsSrc.replace(/<\/script>/gi, '<\\/script>') + '</scr' + 'ipt>';
+    else chartJsBlock = '<scr' + 'ipt src="' + CHART_JS_CDN + '"></scr' + 'ipt>';
+
+    const payload = { benchmarks: benchmarksData, vs: vs };
+    const inner = '(' + buildValuationReportInner.toString() + ')();';
+
+    const html = '<!DOCTYPE html>\n' +
+        '<html lang="zh-CN">\n' +
+        '<head>\n' +
+        '    <meta charset="UTF-8">\n' +
+        '    <meta name="viewport" content="width=device-width, initial-scale=1.0">\n' +
+        '    <title>指数估值比较报告</title>\n' +
+        '    <scr' + 'ipt src="' + TAILWIND_CDN + '"></scr' + 'ipt>\n' +
+        '    ' + chartJsBlock + '\n' +
+        '</head>\n' +
+        '<body class="bg-gray-50 min-h-screen p-6">\n' +
+        '    <div class="max-w-6xl mx-auto">\n' +
+        '        <h1 class="text-3xl font-bold text-center mb-8 text-gray-800">📊 指数估值比较报告</h1>\n' +
+        '        <p class="text-center text-sm text-gray-400 mb-8">生成日期：' + dateStr + '（图表支持鼠标悬停查看各点数值）</p>\n' +
+        '        <div class="bg-white p-6 rounded-xl shadow-md mb-6">\n' +
+        '            <h3 class="text-lg font-semibold text-gray-700 mb-3">估值参数</h3>\n' +
+        '            <div class="grid grid-cols-1 md:grid-cols-2 gap-6" id="valParams"></div>\n' +
+        '        </div>\n' +
+        '        <div class="bg-white p-6 rounded-xl shadow-md mb-6">\n' +
+        '            <div class="flex flex-wrap items-center justify-between mb-3">\n' +
+        '                <h3 class="text-lg font-semibold text-gray-700">单指数点位 · 滚动百分位</h3>\n' +
+        '                <div class="flex flex-wrap items-center gap-2 text-sm">\n' +
+        '                    <span class="text-gray-500">展示区间</span>\n' +
+        '                    <input type="date" id="valSingleShowStart" class="border rounded px-2 py-1 text-sm">\n' +
+        '                    <span class="text-gray-400">~</span>\n' +
+        '                    <input type="date" id="valSingleShowEnd" class="border rounded px-2 py-1 text-sm">\n' +
+        '                    <button onclick="applyValuationSingleRange()" class="px-3 py-1 bg-indigo-600 hover:bg-indigo-700 text-white rounded text-sm">应用</button>\n' +
+        '                </div>\n' +
+        '            </div>\n' +
+        '            <div style="height: 420px;"><canvas id="valSingleExport"></canvas></div>\n' +
+        '            <p class="text-xs text-gray-500 mt-2" id="valSingleNote"></p>\n' +
+        '        </div>\n' +
+        '        <div class="bg-white p-6 rounded-xl shadow-md mb-6">\n' +
+        '            <div class="flex flex-wrap items-center justify-between mb-3">\n' +
+        '                <h3 class="text-lg font-semibold text-gray-700">双指数比值 · 滚动百分位</h3>\n' +
+        '                <div class="flex flex-wrap items-center gap-2 text-sm">\n' +
+        '                    <span class="text-gray-500">展示区间</span>\n' +
+        '                    <input type="date" id="valRatioShowStart" class="border rounded px-2 py-1 text-sm">\n' +
+        '                    <span class="text-gray-400">~</span>\n' +
+        '                    <input type="date" id="valRatioShowEnd" class="border rounded px-2 py-1 text-sm">\n' +
+        '                    <button onclick="applyValuationRatioRange()" class="px-3 py-1 bg-indigo-600 hover:bg-indigo-700 text-white rounded text-sm">应用</button>\n' +
+        '                </div>\n' +
+        '            </div>\n' +
+        '            <div style="height: 420px;"><canvas id="valRatioExport"></canvas></div>\n' +
+        '            <p class="text-xs text-gray-500 mt-2" id="valRatioNote"></p>\n' +
+        '        </div>\n' +
+        '        <p class="text-center text-xs text-gray-400 mt-4">本报告由「基金定投测算工具」生成，数据为历史测算，不构成收益保证。</p>\n' +
+        '    </div>\n' +
+        '    <scr' + 'ipt>window.__V__ = ' + JSON.stringify(payload).replace(/<\/script>/gi, '<\\/script>') + ';</scr' + 'ipt>\n' +
+        '    <scr' + 'ipt>' + inner + '</scr' + 'ipt>\n' +
+        '</body>\n' +
+        '</html>';
+
+    const blob = new Blob([html], { type: 'text/html;charset=utf-8' });
+    const url = URL.createObjectURL(blob);
+    const a = document.createElement('a');
+    a.href = url;
+    a.download = '估值报告_' + dateStr + '.html';
+    document.body.appendChild(a); a.click(); a.remove();
+    URL.revokeObjectURL(url);
+}
+
+// 估值报告内嵌脚本：在报告页内独立运行，复用主工具的估值算法
+function buildValuationReportInner() {
+    var V = window.__V__;
+    var benchmarks = V.benchmarks;
+    var vs = V.vs;
+    var DAYS = 252;
+
+    function getBm(id) {
+        if (id == null || id === '') return null;
+        var k = String(id);
+        for (var i = 0; i < benchmarks.length; i++) {
+            if (String(benchmarks[i].id) === k) return benchmarks[i];
+        }
+        return null;
+    }
+    function fmt(v) { return (v == null || v === '') ? '—' : v; }
+    function rollingMean(navs, n) {
+        var m = Math.max(1, n); var out = new Array(navs.length); var sum = 0;
+        for (var i = 0; i < navs.length; i++) { sum += navs[i]; if (i >= m) sum -= navs[i - m]; var cnt = Math.min(i + 1, m); out[i] = sum / cnt; }
+        return out;
+    }
+    function rollingPercentile(navs, windowN) {
+        var n = navs.length; var sorted = []; var out = new Array(n); var windowStart = 0;
+        for (var i = 0; i < n; i++) {
+            var val = navs[i];
+            var lo = 0, hi = sorted.length;
+            while (lo < hi) { var mid = (lo + hi) >> 1; if (sorted[mid] < val) lo = mid + 1; else hi = mid; }
+            sorted.splice(lo, 0, val);
+            if (i - windowStart + 1 > windowN) {
+                var evict = navs[windowStart++];
+                var elo = 0, ehi = sorted.length;
+                while (elo < ehi) { var emid = (elo + ehi) >> 1; if (sorted[emid] < evict) elo = emid + 1; else ehi = emid; }
+                sorted.splice(elo, 1);
+            }
+            out[i] = (sorted.length < windowN) ? null : (lo / sorted.length) * 100;
+        }
+        return out;
+    }
+    function commonDateRange(bmA, bmB) {
+        var datesA = bmA.data.map(function (d) { return d.date; }).sort();
+        var setB = {};
+        bmB.data.forEach(function (d) { setB[d.date] = 1; });
+        var common = datesA.filter(function (dt) { return setB[dt]; });
+        if (common.length === 0) return null;
+        return { start: common[0], end: common[common.length - 1] };
+    }
+    function buildRatioSeries(bmA, bmB, start, end) {
+        var mapA = {}, mapB = {};
+        bmA.data.forEach(function (d) { mapA[d.date] = d.nav; });
+        bmB.data.forEach(function (d) { mapB[d.date] = d.nav; });
+        var common = Object.keys(mapA).filter(function (dt) { return mapB[dt] != null && dt >= start && dt <= end; }).sort();
+        if (common.length === 0) return null;
+        var ratioByDate = [];
+        for (var i = 0; i < common.length; i++) ratioByDate.push({ date: common[i], r: mapA[common[i]] / mapB[common[i]] });
+        return ratioByDate;
+    }
+    function chartOpts(yTitle) {
+        return { responsive: true, maintainAspectRatio: false, interaction: { mode: 'index', intersect: false },
+            plugins: { legend: { labels: { boxWidth: 12 } }, tooltip: { mode: 'index', intersect: false } },
+            scales: { x: { ticks: { maxTicksLimit: 12 } }, y: { position: 'left', title: { display: true, text: yTitle } },
+                y1: { position: 'right', min: 0, max: 100, grid: { drawOnChartArea: false }, title: { display: true, text: '百分位 (%)' } } } };
+    }
+
+    // 参数概览
+    function paramCard(title, items) {
+        var rows = items.map(function (it) {
+            return '<div class="flex justify-between py-1 border-b border-gray-100"><span class="text-sm text-gray-500">' + it[0] + '</span><span class="text-sm font-medium text-gray-800">' + it[1] + '</span></div>';
+        }).join('');
+        return '<div><div class="text-sm font-semibold text-indigo-700 mb-2">' + title + '</div>' + rows + '</div>';
+    }
+    var singleName = getBm(vs.valSingleIndex) ? getBm(vs.valSingleIndex).name : fmt(vs.valSingleIndex);
+    var ratioAName = getBm(vs.valRatioA) ? getBm(vs.valRatioA).name : fmt(vs.valRatioA);
+    var ratioBName = getBm(vs.valRatioB) ? getBm(vs.valRatioB).name : fmt(vs.valRatioB);
+    document.getElementById('valParams').innerHTML =
+        paramCard('单指数', [
+            ['指数', singleName],
+            ['点位区间', (fmt(vs.valSingleStart) + ' ~ ' + fmt(vs.valSingleEnd))],
+            ['展示区间', (fmt(vs.valSingleShowStart) + ' ~ ' + fmt(vs.valSingleShowEnd))],
+            ['滚动年度', [vs.valSingleRollYears1, vs.valSingleRollYears2, vs.valSingleRollYears3].filter(function (x) { return x && parseFloat(x) > 0; }).join(' / ') || '—'],
+            ['百分位均值N', fmt(vs.valSingleMeanN)],
+            ['阈值(高/低)', (fmt(vs.valSingleHi) + ' / ' + fmt(vs.valSingleLo))]
+        ]) +
+        paramCard('双指数', [
+            ['指数 A / B', ratioAName + ' / ' + ratioBName],
+            ['点位区间', (fmt(vs.valRatioStart) + ' ~ ' + fmt(vs.valRatioEnd))],
+            ['展示区间', (fmt(vs.valRatioShowStart) + ' ~ ' + fmt(vs.valRatioShowEnd))],
+            ['滚动年度', [vs.valRatioRollYears1, vs.valRatioRollYears2].filter(function (x) { return x && parseFloat(x) > 0; }).join(' / ') || '—'],
+            ['口径', (vs.valRatioMode === 'ma' ? fmt(vs.valRatioN) + '日均值' : '点位') + '比值'],
+            ['阈值(高/低)', (fmt(vs.valRatioHi) + ' / ' + fmt(vs.valRatioLo))]
+        ]);
+
+    // ---- 单指数图（可重入渲染，支持报告内调整展示区间） ----
+    var singleChart = null;
+    var singleDisp = { showStart: (vs.valSingleShowStart || vs.valSingleStart || ''), showEnd: (vs.valSingleShowEnd || vs.valSingleEnd || '') };
+    var sSS = document.getElementById('valSingleShowStart');
+    var sSE = document.getElementById('valSingleShowEnd');
+    if (sSS) sSS.value = singleDisp.showStart;
+    if (sSE) sSE.value = singleDisp.showEnd;
+    function renderValuationSingle() {
+        var bm = getBm(vs.valSingleIndex);
+        if (!bm || !bm.data || !bm.data.length) {
+            var holder = document.getElementById('valSingleExport');
+            if (holder) holder.parentNode.innerHTML = '<p class="text-gray-500 text-sm">请先选择基准指数</p>';
+            return;
+        }
+        var data = bm.data.slice().sort(function (a, b) { return a.date.localeCompare(b.date); });
+        var dataFirst = data[0].date, dataLast = data[data.length - 1].date;
+        // 展示日期输入设置 min/max，并钳制值到指数实际数据范围内，防止年份溢出
+        if (sSS) { sSS.min = dataFirst; sSS.max = dataLast; }
+        if (sSE) { sSE.min = dataFirst; sSE.max = dataLast; }
+        var start = vs.valSingleStart, end = vs.valSingleEnd;
+        var showStart = singleDisp.showStart || start, showEnd = singleDisp.showEnd || end;
+        if (showStart && showStart < dataFirst) showStart = dataFirst;
+        if (showStart && showStart > dataLast) showStart = dataLast;
+        if (showEnd && showEnd < dataFirst) showEnd = dataFirst;
+        if (showEnd && showEnd > dataLast) showEnd = dataLast;
+        var hi = parseFloat(vs.valSingleHi) || 80, lo = parseFloat(vs.valSingleLo) || 20;
+        var meanN = parseInt(vs.valSingleMeanN, 10) || 0;
+        var rollYears = [vs.valSingleRollYears1, vs.valSingleRollYears2, vs.valSingleRollYears3]
+            .map(function (x) { return parseFloat(x); })
+            .filter(function (x) { return !isNaN(x) && x > 0; });
+        var dates = data.map(function (d) { return d.date; });
+        var navs = data.map(function (d) { return d.nav; });
+        var pctBase = meanN > 1 ? rollingMean(navs, meanN) : navs;
+        var pctSeries = [];
+        for (var k = 0; k < rollYears.length; k++) pctSeries.push(rollingPercentile(pctBase, Math.max(1, rollYears[k]) * DAYS));
+        var pctDates = [], pointVals = [], pctFiltered = [];
+        for (var i = 0; i < navs.length; i++) {
+            if (showStart && dates[i] < showStart) continue;
+            if (showEnd && dates[i] > showEnd) continue;
+            pctDates.push(dates[i]); pointVals.push(navs[i]);
+        }
+        pctFiltered = pctSeries.map(function (src) {
+            var out = [];
+            for (var j = 0; j < navs.length; j++) {
+                if (showStart && dates[j] < showStart) continue;
+                if (showEnd && dates[j] > showEnd) continue;
+                out.push(src[j]);
+            }
+            return out;
+        });
+        var datasets = [{ label: bm.name + ' 点位', data: pointVals, yAxisID: 'y', borderColor: '#6366F1', backgroundColor: 'rgba(99,102,241,0.08)', fill: true, tension: 0.1, pointRadius: 0, borderWidth: 2 }];
+        var colors = ['rgba(16,185,129,0.5)', 'rgba(139,92,246,0.5)', 'rgba(245,158,11,0.5)'];
+        for (var k2 = 0; k2 < rollYears.length; k2++) datasets.push({ label: '百分位 ' + rollYears[k2] + ' 年 (%)' + (meanN > 1 ? ' / ' + meanN + '日均值' : ''), data: pctFiltered[k2], yAxisID: 'y1', borderColor: colors[k2 % colors.length], backgroundColor: 'transparent', fill: false, tension: 0.1, pointRadius: 0, borderWidth: 2 });
+        if (hi > 0) datasets.push({ label: '高估线 ' + hi + '%', data: pctDates.map(function () { return hi; }), yAxisID: 'y1', borderColor: '#EF4444', borderDash: [6, 3], pointRadius: 0, borderWidth: 1.5, fill: false });
+        if (lo > 0) datasets.push({ label: '低估线 ' + lo + '%', data: pctDates.map(function () { return lo; }), yAxisID: 'y1', borderColor: '#3B82F6', borderDash: [6, 3], pointRadius: 0, borderWidth: 1.5, fill: false });
+        if (singleChart) singleChart.destroy();
+        singleChart = new Chart(document.getElementById('valSingleExport').getContext('2d'), { type: 'line', data: { labels: pctDates, datasets: datasets }, options: chartOpts('点位') });
+        var note = document.getElementById('valSingleNote');
+        if (note) note.textContent = '口径：' + (meanN > 1 ? meanN + '日均值' : '点位') + '（百分位同口径）' + (rollYears.length ? '，滚动 ' + rollYears.join('/') + ' 年' : '，未填滚动年度不画百分位线') + '，阈值高 ' + hi + '% / 低 ' + lo + '%；数据不足所选滚动年度的起始段留白。';
+    }
+    window.applyValuationSingleRange = function () {
+        singleDisp.showStart = sSS ? sSS.value : '';
+        singleDisp.showEnd = sSE ? sSE.value : '';
+        renderValuationSingle();
+    };
+    renderValuationSingle();
+
+    // ---- 双指数比值图（可重入渲染，支持报告内调整展示区间） ----
+    var ratioChart = null;
+    var ratioDisp = { showStart: (vs.valRatioShowStart || vs.valRatioStart || ''), showEnd: (vs.valRatioShowEnd || vs.valRatioEnd || '') };
+    var rSS = document.getElementById('valRatioShowStart');
+    var rSE = document.getElementById('valRatioShowEnd');
+    if (rSS) rSS.value = ratioDisp.showStart;
+    if (rSE) rSE.value = ratioDisp.showEnd;
+    function renderValuationRatio() {
+        var note = document.getElementById('valRatioNote');
+        var idA = vs.valRatioA, idB = vs.valRatioB;
+        var bmA = getBm(idA), bmB = getBm(idB);
+        if (!bmA || !bmB || String(idA) === String(idB)) {
+            document.getElementById('valRatioExport').parentNode.innerHTML = '<p class="text-gray-500 text-sm">请先选择指数 A 与指数 B（且不相同）</p>';
+            return;
+        }
+        var mode = vs.valRatioMode, n = parseInt(vs.valRatioN, 10) || 20;
+        var hi = parseFloat(vs.valRatioHi) || 80, lo = parseFloat(vs.valRatioLo) || 20;
+        var rollYears = [vs.valRatioRollYears1, vs.valRatioRollYears2]
+            .map(function (x) { return parseFloat(x); })
+            .filter(function (x) { return !isNaN(x) && x > 0; });
+        var range = commonDateRange(bmA, bmB);
+        var start = vs.valRatioStart || (range ? range.start : ''), end = vs.valRatioEnd || (range ? range.end : '');
+        var showStart = ratioDisp.showStart || start, showEnd = ratioDisp.showEnd || end;
+        if (!start || !end) {
+            document.getElementById('valRatioExport').parentNode.innerHTML = '<p class="text-gray-500 text-sm">两个指数无共同交易日，无法计算比值</p>';
+            return;
+        }
+        // 展示日期输入设置 min/max，并钳制值到共同交易日范围内，防止年份溢出
+        if (rSS) { rSS.min = range ? range.start : ''; rSS.max = range ? range.end : ''; }
+        if (rSE) { rSE.min = range ? range.start : ''; rSE.max = range ? range.end : ''; }
+        if (range && showStart && showStart < range.start) showStart = range.start;
+        if (range && showStart && showStart > range.end) showStart = range.end;
+        if (range && showEnd && showEnd < range.start) showEnd = range.start;
+        if (range && showEnd && showEnd > range.end) showEnd = range.end;
+        var series = buildRatioSeries(bmA, bmB, start, end);
+        if (!series || series.length === 0) {
+            document.getElementById('valRatioExport').parentNode.innerHTML = '<p class="text-gray-500 text-sm">点位区间内无共同交易日，无法计算比值</p>';
+            return;
+        }
+        var dates = series.map(function (s) { return s.date; });
+        var ratiosRaw = series.map(function (s) { return s.r; });
+        var ratioValsMain = mode === 'ma' ? rollingMean(ratiosRaw, n) : ratiosRaw;
+        var pctSeries = [];
+        for (var k = 0; k < rollYears.length; k++) pctSeries.push(rollingPercentile(ratioValsMain, Math.max(1, rollYears[k]) * DAYS));
+        var pctDates = [], ratioVals = [], pctFiltered = [];
+        for (var i = 0; i < ratiosRaw.length; i++) {
+            if (showStart && dates[i] < showStart) continue;
+            if (showEnd && dates[i] > showEnd) continue;
+            pctDates.push(dates[i]); ratioVals.push(ratioValsMain[i]);
+        }
+        pctFiltered = pctSeries.map(function (src) {
+            var out = [];
+            for (var j = 0; j < ratiosRaw.length; j++) {
+                if (showStart && dates[j] < showStart) continue;
+                if (showEnd && dates[j] > showEnd) continue;
+                out.push(src[j]);
+            }
+            return out;
+        });
+        var ratioLabel = bmA.name + ' / ' + bmB.name + (mode === 'ma' ? ' (' + n + '日均值)' : '');
+        var datasets = [{ label: ratioLabel, data: ratioVals, yAxisID: 'y', borderColor: '#6366F1', backgroundColor: 'rgba(99,102,241,0.08)', fill: true, tension: 0.1, pointRadius: 0, borderWidth: 2 }];
+        var colors = ['rgba(16,185,129,0.5)', 'rgba(139,92,246,0.5)', 'rgba(245,158,11,0.5)'];
+        for (var k2 = 0; k2 < rollYears.length; k2++) datasets.push({ label: '比值百分位 ' + rollYears[k2] + ' 年 (%)', data: pctFiltered[k2], yAxisID: 'y1', borderColor: colors[k2 % colors.length], backgroundColor: 'transparent', fill: false, tension: 0.1, pointRadius: 0, borderWidth: 2 });
+        if (hi > 0) datasets.push({ label: '高估线 ' + hi + '%', data: pctDates.map(function () { return hi; }), yAxisID: 'y1', borderColor: '#EF4444', borderDash: [6, 3], pointRadius: 0, borderWidth: 1.5, fill: false });
+        if (lo > 0) datasets.push({ label: '低估线 ' + lo + '%', data: pctDates.map(function () { return lo; }), yAxisID: 'y1', borderColor: '#3B82F6', borderDash: [6, 3], pointRadius: 0, borderWidth: 1.5, fill: false });
+        if (ratioChart) ratioChart.destroy();
+        ratioChart = new Chart(document.getElementById('valRatioExport').getContext('2d'), { type: 'line', data: { labels: pctDates, datasets: datasets }, options: chartOpts('比值') });
+        if (note) note.textContent = '口径：' + (mode === 'ma' ? n + '日均值' : '点位') + '比值（百分位同口径），滚动 ' + (rollYears.join('/') || '—') + ' 年，阈值高 ' + hi + '% / 低 ' + lo + '%；数据不足所选滚动年度的起始段留白。';
+    }
+    window.applyValuationRatioRange = function () {
+        ratioDisp.showStart = rSS ? rSS.value : '';
+        ratioDisp.showEnd = rSE ? rSE.value : '';
+        renderValuationRatio();
+    };
+    renderValuationRatio();
 }
 
 

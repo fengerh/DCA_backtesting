@@ -42,6 +42,8 @@ function parseDateString(str) {
         }
         const dt = new Date(y, m - 1, d);
         if (isNaN(dt.getTime())) continue;
+        // 年份边界控制：越界（<1900 或 >当前年+2）视为非法
+        if (!isValidYear4(y)) continue;
         // 回填校验：拒绝越界值（如 2026-02-31 被 JS 静默滚动成 3-03）
         if (dt.getFullYear() !== y || dt.getMonth() !== m - 1 || dt.getDate() !== d) continue;
         return dt;
@@ -53,7 +55,10 @@ function parseDateString(str) {
 function excelSerialToDate(serial) {
     const utcMs = Math.round((serial - 25569) * 86400000);
     const d = new Date(utcMs);
-    return new Date(d.getUTCFullYear(), d.getUTCMonth(), d.getUTCDate());
+    const dt = new Date(d.getUTCFullYear(), d.getUTCMonth(), d.getUTCDate());
+    // 年份边界控制：异常序列号产生 5 位及以上年份时返回 Invalid Date
+    if (!isValidYear4(dt.getFullYear())) return new Date(NaN);
+    return dt;
 }
 
 // 增强解析：Date对象 / 数字序列号 / yyyy-mm-dd / yyyy/m/d / yyyy年m月d日 / yyyymmdd / 纯数字
@@ -64,7 +69,10 @@ function parseDateFlexible(raw) {
     if (raw instanceof Date) {
         if (isNaN(raw.getTime())) return null;
         const d = new Date(Math.round(raw.getTime() / 86400000) * 86400000);
-        return new Date(d.getUTCFullYear(), d.getUTCMonth(), d.getUTCDate());
+        const dt = new Date(d.getUTCFullYear(), d.getUTCMonth(), d.getUTCDate());
+        // 年份边界控制：越界（<1900 或 >当前年+2）视为非法
+        if (!isValidYear4(dt.getFullYear())) return null;
+        return dt;
     }
     // 注意：raw:true 已让真日期单元格产出 Date，切勿改用 raw:false/dateNF 按显示格式
     // (number_format) 反推解析——显示格式与存储值无关，mm-dd-yy 会被吐成 '01-04-05'
@@ -78,13 +86,39 @@ function parseDateFlexible(raw) {
     let m = s.match(/^(\d{4})\s*年\s*(\d{1,2})\s*月\s*(\d{1,2})\s*日\s*$/);
     if (m) {
         const dt = new Date(+m[1], +m[2] - 1, +m[3]);
-        if (!isNaN(dt.getTime())) return dt;
+        if (!isNaN(dt.getTime()) && isValidYear4(dt.getFullYear())) return dt;
     }
     if (/^\d{8}$/.test(s)) {                       // 紧凑 yyyymmdd
         const dt = new Date(+s.slice(0,4), +s.slice(4,6) - 1, +s.slice(6,8));
-        if (!isNaN(dt.getTime())) return dt;
+        if (!isNaN(dt.getTime()) && isValidYear4(dt.getFullYear())) return dt;
     }
     if (/^\d+(\.\d+)?$/.test(s)) return excelSerialToDate(parseFloat(s)); // 数字序列号
     return null;
+}
+
+// ============ 年份边界控制 ============
+// 仅拦截 5 位及以上年份：任意 4 位正整数年份（1000~9999）均视为合法。
+function isValidYear4(year) {
+    if (typeof year !== 'number' || !isFinite(year)) return false;
+    if (!Number.isInteger(year)) return false;
+    return year >= 1000 && year <= 9999;
+}
+
+// 校验 yyyy-mm-dd 日期字符串的年份是否为 4 位合法年份；非法返回 false
+function isValidDateInput(value) {
+    if (typeof value !== 'string') return false;
+    const m = value.match(/^(\d{4})-(\d{2})-(\d{2})$/);
+    if (!m) return false;
+    const y = parseInt(m[1], 10);
+    if (!isValidYear4(y)) return false;
+    // 回填校验：拒绝 2/30、2/31、4/31 等非法日（避免 JS Date 静默滚动）
+    const dt = new Date(y, parseInt(m[2], 10) - 1, parseInt(m[3], 10));
+    if (isNaN(dt.getTime())) return false;
+    return dt.getFullYear() === y && dt.getMonth() === parseInt(m[2], 10) - 1 && dt.getDate() === parseInt(m[3], 10);
+}
+
+// 日期输入边界净化：合法返回原字符串，非法返回 null（调用方据此拒绝写入，不弹窗）
+function sanitizeDateInput(value) {
+    return isValidDateInput(value) ? value : null;
 }
 
