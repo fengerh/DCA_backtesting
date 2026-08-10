@@ -509,6 +509,12 @@ function renderPlanList() {
                 if (e.target.type === 'number') v = parseFloat(v);
                 if (e.target.type === 'checkbox') v = e.target.checked;
                 if (f === 'weekday') v = parseInt(e.target.value, 10);
+                // 日期字段年份边界控制：非法（5 位及以上年份/越界 1900~当前年+2）拒绝写入，恢复原值
+                if (e.target.type === 'date') {
+                    const clean = sanitizeDateInput(v);
+                    if (clean === null) { e.target.value = p[f] || ''; return; }
+                    v = clean;
+                }
                 p[f] = v;
                 if (f === 'fund') {
                     const nf = fundsData[v];
@@ -540,6 +546,12 @@ function renderPlanList() {
                 if (!ev) return;
                 let v = e.target.value;
                 if (f === 'value') v = parseFloat(v);
+                // 赎回日期年份边界控制：非法拒绝写入并恢复原值
+                if (f === 'date') {
+                    const clean = sanitizeDateInput(v);
+                    if (clean === null) { e.target.value = ev.date || ''; return; }
+                    v = clean;
+                }
                 ev[f] = v;
             });
         });

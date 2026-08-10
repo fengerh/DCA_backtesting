@@ -70,11 +70,13 @@ function autoFillSingleRange() {
     // 始终按当前选中基准指数的全部日期范围刷新（取该指数的最大可用区间）
     startEl.value = first;
     endEl.value = last;
+    // 点位与展示日期输入都设置 min/max 上限，防止年份溢出数据范围
+    [startEl, endEl].forEach(el => { el.min = first; el.max = last; });
     // 同步填充独立展示区间默认为该指数的默认区间（指数最大日期范围），切换指数时一并刷新
     const showStartEl = document.getElementById('valSingleShowStart');
     const showEndEl = document.getElementById('valSingleShowEnd');
-    if (showStartEl) showStartEl.value = first;
-    if (showEndEl) showEndEl.value = last;
+    if (showStartEl) { showStartEl.value = first; showStartEl.min = first; showStartEl.max = last; }
+    if (showEndEl) { showEndEl.value = last; showEndEl.min = first; showEndEl.max = last; }
 }
 
 // 滚动百分位序列：对已排序 dates/navs，取每个 index 以 i 为终点、长度<=window 的窗口，
@@ -99,8 +101,9 @@ function rollingPercentile(navs, windowN) {
             sorted.splice(elo, 1);
         }
         // 百分位 = 窗口内小于 val 的样本占比
+        // 窗口未满（数据起始处不足所选滚动年度）时留白（null），避免用累计窗口造成前期大幅波动
         const less = lo; // lo 即 val 应插入的位置 = 严格小于 val 的元素个数
-        out[i] = (less / sorted.length) * 100;
+        out[i] = (sorted.length < windowN) ? null : (less / sorted.length) * 100;
     }
     return { startIdx: windowStart, percentile: out };
 }
@@ -132,10 +135,22 @@ function renderSingleValuation() {
     // 点位时间区间：空 = 全部数据
     const start = document.getElementById('valSingleStart').value;
     const end = document.getElementById('valSingleEnd').value;
+    // 年份边界控制：非法（5 位及以上年份/越界）则中止渲染，避免异常日期进入图表
+    if (start && sanitizeDateInput(start) === null) return;
+    if (end && sanitizeDateInput(end) === null) return;
     if (start && end && start > end) { if (hint) hint.textContent = '开始日期晚于结束日期，请检查'; return; }
     // 独立展示区间：仅控制图表显示范围，不影响百分位计算；空 = 随点位区间
-    const showStart = document.getElementById('valSingleShowStart').value;
-    const showEnd = document.getElementById('valSingleShowEnd').value;
+    // 防溢出：将展示日期钳制到该指数实际数据范围内，年份不会超出可用区间
+    const dataFirst = data[0].date, dataLast = data[data.length - 1].date;
+    let showStart = document.getElementById('valSingleShowStart').value;
+    let showEnd = document.getElementById('valSingleShowEnd').value;
+    // 年份边界控制：非法则中止渲染
+    if (showStart && sanitizeDateInput(showStart) === null) return;
+    if (showEnd && sanitizeDateInput(showEnd) === null) return;
+    if (showStart && (showStart < dataFirst)) showStart = dataFirst;
+    if (showStart && (showStart > dataLast)) showStart = dataLast;
+    if (showEnd && (showEnd < dataFirst)) showEnd = dataFirst;
+    if (showEnd && (showEnd > dataLast)) showEnd = dataLast;
     const dispStart = showStart || start;
     const dispEnd = showEnd || end;
     if (dispStart && dispEnd && dispStart > dispEnd) { if (hint) hint.textContent = '展示开始日期晚于展示结束日期，请检查'; return; }
@@ -239,11 +254,16 @@ function autoFillRatioDates() {
     if (!range) { if (hint) hint.textContent = '两个指数无共同交易日'; return; }
     document.getElementById('valRatioStart').value = range.start;
     document.getElementById('valRatioEnd').value = range.end;
+    // 点位与展示日期输入都设置 min/max 上限，防止年份溢出共同交易日范围
+    const startEl = document.getElementById('valRatioStart');
+    const endEl = document.getElementById('valRatioEnd');
+    if (startEl) { startEl.min = range.start; startEl.max = range.end; }
+    if (endEl) { endEl.min = range.start; endEl.max = range.end; }
     // 展示日期默认跟随点位区间（仅当展示日期为空时设置，避免覆盖用户手动修改的值）
     const showStartEl = document.getElementById('valRatioShowStart');
     const showEndEl = document.getElementById('valRatioShowEnd');
-    if (showStartEl && !showStartEl.value) showStartEl.value = range.start;
-    if (showEndEl && !showEndEl.value) showEndEl.value = range.end;
+    if (showStartEl) { if (!showStartEl.value) showStartEl.value = range.start; showStartEl.min = range.start; showStartEl.max = range.end; }
+    if (showEndEl) { if (!showEndEl.value) showEndEl.value = range.end; showEndEl.min = range.start; showEndEl.max = range.end; }
     if (hint) hint.textContent = `共同交易日范围：${range.start} ~ ${range.end}（可手动调整）`;
 }
 
@@ -311,6 +331,9 @@ function renderRatioValuation() {
         document.getElementById('valRatioStart').value = start;
         document.getElementById('valRatioEnd').value = end;
     }
+    // 年份边界控制：非法（5 位及以上年份/越界）则中止渲染
+    if (start && sanitizeDateInput(start) === null) return;
+    if (end && sanitizeDateInput(end) === null) return;
     if (start > end) { if (hint) hint.textContent = '点位开始日期晚于点位结束日期，请检查'; return; }
 
     // 独立展示区间：仅控制图表显示范围，不影响百分位计算；
@@ -319,8 +342,17 @@ function renderRatioValuation() {
     const showEndEl = document.getElementById('valRatioShowEnd');
     if (showStartEl && !showStartEl.value && range) showStartEl.value = range.start;
     if (showEndEl && !showEndEl.value && range) showEndEl.value = range.end;
-    const showStart = showStartEl ? showStartEl.value : '';
-    const showEnd = showEndEl ? showEndEl.value : '';
+    // 防溢出：将展示日期钳制到两指数共同交易日范围内，年份不会超出可用区间
+    const rangeFirst = range ? range.start : null, rangeLast = range ? range.end : null;
+    let showStart = showStartEl ? showStartEl.value : '';
+    let showEnd = showEndEl ? showEndEl.value : '';
+    // 年份边界控制：非法则中止渲染
+    if (showStart && sanitizeDateInput(showStart) === null) return;
+    if (showEnd && sanitizeDateInput(showEnd) === null) return;
+    if (showStart && rangeFirst && showStart < rangeFirst) showStart = rangeFirst;
+    if (showStart && rangeLast && showStart > rangeLast) showStart = rangeLast;
+    if (showEnd && rangeFirst && showEnd < rangeFirst) showEnd = rangeFirst;
+    if (showEnd && rangeLast && showEnd > rangeLast) showEnd = rangeLast;
     const dispStart = showStart || start;
     const dispEnd = showEnd || end;
     if (dispStart && dispEnd && dispStart > dispEnd) { if (hint) hint.textContent = '展示开始日期晚于展示结束日期，请检查'; return; }

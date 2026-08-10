@@ -10,7 +10,7 @@ let scResults = [];
 let scPoolCap = Infinity;      // 全局共享资金池上限（留空/0/NaN = 不限制）
 let scPool = { remaining: Infinity };   // 本次比较的共享资金池状态，跨条目结转
 let scChart = null;
-let scChartXMode = 'month';   // 'month' | 'date'
+let scChartXMode = 'date';   // 'month' | 'date'
 let scChartYMode = 'net';     // 'net' | 'xirr'
 let scNetMode = 'mw';         // 'mw' 资金加权 | 'portfolio' 时间加权净值(份额法)
 // XIRR 曲线当前勾选的窗口口径集合（多选叠加），默认仅"累计"，保证首屏行为与既有一致
@@ -146,6 +146,12 @@ function renderScItems() {
                 let v = e.target.value;
                 if (e.target.type === 'number') v = parseFloat(v);
                 if (e.target.type === 'checkbox') v = e.target.checked;
+                // 日期字段年份边界控制：非法（5 位及以上年份/越界 1900~当前年+2）拒绝写入，恢复原值
+                if (e.target.type === 'date') {
+                    const clean = sanitizeDateInput(v);
+                    if (clean === null) { e.target.value = item[f] || ''; return; }
+                    v = clean;
+                }
                 item[f] = v;
                 if (f === 'fund') {
                     item.startDate = fundsData[v].minDate;
@@ -166,6 +172,12 @@ function renderScItems() {
                 if (!ev) return;
                 let v = e.target.value;
                 if (f === 'value') v = parseFloat(v);
+                // 赎回日期年份边界控制：非法拒绝写入并恢复原值
+                if (f === 'date') {
+                    const clean = sanitizeDateInput(v);
+                    if (clean === null) { e.target.value = ev.date || ''; return; }
+                    v = clean;
+                }
                 ev[f] = v;
                 if (f === 'mode') renderScItems();   // 切换比例/金额不影响布局，保持一致
             });
@@ -965,8 +977,8 @@ function portfolioNetValues(assets, flows) {
     return nv;
 }
 
-// 生成规律化日期刻度：以季度末(3/31,6/30,9/30,12/31)为基础网格，按数据跨度抽稀为
-// 月末 / 季末 / 半年末 / 年末 / 多年末。产出刻度均为规整日历时点，且落在 [xMin,xMax] 闭区间内。
+// 生成规律化日期刻度：以季度初(1/1,4/1,7/1,10/1)为基础网格，按数据跨度抽稀为
+// 月初 / 季初 / 半年初 / 年初 / 多年初。产出刻度均为规整日历时点，且落在 [xMin,xMax] 闭区间内。
 // 返回 { ticks: number[] 升序时间戳, unit: 'month'|'quarter'|'half'|'year'|'multiYear' }
 function scDateTickInfo(xMin, xMax) {
     if (!(xMin != null && xMax != null && isFinite(xMin) && isFinite(xMax) && xMax > xMin)) {
@@ -976,23 +988,23 @@ function scDateTickInfo(xMin, xMax) {
     const spanYears = (xMax - xMin) / YEAR;
     // 自适应粒度：跨度越长刻度越稀
     let unit, stepMonths;
-    if (spanYears < 0.75) { unit = 'month'; stepMonths = 1; }          // 短周期 -> 月末
-    else if (spanYears <= 2) { unit = 'quarter'; stepMonths = 3; }      // 季度末
-    else if (spanYears <= 5) { unit = 'half'; stepMonths = 6; }         // 半年末
-    else if (spanYears <= 12) { unit = 'year'; stepMonths = 12; }       // 年末
-    else { unit = 'multiYear'; stepMonths = spanYears > 24 ? 60 : 24; } // 每2/5年末
+    if (spanYears < 0.75) { unit = 'month'; stepMonths = 1; }          // 短周期 -> 月初
+    else if (spanYears <= 2) { unit = 'quarter'; stepMonths = 3; }      // 季初
+    else if (spanYears <= 5) { unit = 'half'; stepMonths = 6; }         // 半年初
+    else if (spanYears <= 12) { unit = 'year'; stepMonths = 12; }       // 年初
+    else { unit = 'multiYear'; stepMonths = spanYears > 24 ? 60 : 24; } // 每2/5年初
 
-    // 从包含 xMin 的当月起，逐月推进，按 stepMonths 取季末/半年末/年末等规整点
+    // 从包含 xMin 的当月起，逐月推进，按 stepMonths 取季初/半年初/年初等规整点
     const start = new Date(xMin);
     let y = start.getFullYear(), m = start.getMonth(); // m: 0-11
-    // 规整对齐：month 取当月月末逐月推进；其余模式对齐到更粗网格的起点
+    // 规整对齐：month 取当月月初逐月推进；其余模式对齐到更粗网格的起点
     if (unit !== 'month') {
-        let alignMonth; // 0-11，对应目标网格的起始月末月
-        if (unit === 'year' || unit === 'multiYear') alignMonth = 11;      // 年末 12/31
-        else if (unit === 'half') alignMonth = (m <= 5) ? 5 : 11;          // 半年末 6/30 或 12/31
-        else alignMonth = Math.floor(m / 3) * 3 + 2;                       // 季末 3/31,6/30,9/30,12/31
-        // 若该网格起点月末已晚于(含) xMin 则用之，否则顺延一个 step
-        if (new Date(y, alignMonth + 1, 0).getTime() < xMin) {
+        let alignMonth; // 0-11，对应目标网格的起始月初月
+        if (unit === 'year' || unit === 'multiYear') alignMonth = 0;      // 年初 1/1
+        else if (unit === 'half') alignMonth = (m < 6) ? 0 : 6;           // 半年初 1/1 或 7/1
+        else alignMonth = Math.floor(m / 3) * 3;                          // 季初 1/1,4/1,7/1,10/1
+        // 若该网格起点月初已晚于(含) xMin 则用之，否则顺延一个 step
+        if (new Date(y, alignMonth, 1).getTime() < xMin) {
             m = alignMonth + stepMonths; if (m > 11) { m -= 12; y += 1; }
         } else {
             m = alignMonth;
@@ -1001,7 +1013,7 @@ function scDateTickInfo(xMin, xMax) {
     const ticks = [];
     const guard = 2000; // 安全阀，避免死循环
     for (let i = 0; i < guard; i++) {
-        const ts = new Date(y, m + 1, 0).getTime(); // 当月最后一天(自然处理闰年2月)
+        const ts = new Date(y, m, 1).getTime(); // 当月第一天(自然处理闰年2月)
         if (ts > xMax) break;
         if (ts >= xMin) ticks.push(ts);
         m += stepMonths;
@@ -1022,7 +1034,7 @@ function scFormatDateTick(ts, unit) {
     const d = new Date(ts);
     const y = d.getFullYear(), m = d.getMonth(); // m: 0-11
     if (unit === 'year' || unit === 'multiYear') return String(y);
-    if (unit === 'half') return m === 5 ? y + 'H1' : y + 'H2';
+    if (unit === 'half') return m === 0 ? y + 'H1' : y + 'H2';
     if (unit === 'quarter') return y + 'Q' + (Math.floor(m / 3) + 1);
     return y + '-' + String(m + 1).padStart(2, '0'); // month
 }
