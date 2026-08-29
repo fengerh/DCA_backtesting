@@ -571,6 +571,17 @@ function renderPlanList() {
         const del = card.querySelector('[data-act="del"]');
         if (del) del.addEventListener('click', () => deletePlan(p.id));
     });
+    refreshRebalanceUI();
+}
+
+// 再平衡设置显隐：仅当组合含 2 个及以上不同基金的单笔投资(single)计划时展示
+function refreshRebalanceUI() {
+    const sec = document.getElementById('rebalanceSection');
+    if (!sec) return;
+    const singles = investmentPlans.filter(p => p.type === 'single');
+    const show = investmentPlans.length >= 2 && singles.length === investmentPlans.length
+        && new Set(singles.map(p => p.fund)).size >= 2;
+    sec.style.display = show ? 'flex' : 'none';
 }
 
 // 核心回测（保持不变）
@@ -693,6 +704,30 @@ function runBacktest() {
     // 导入基准净值映射缓存（按基准 id），maxDrawdown 选 bench:<id> 时懒加载一次
     const benchNavMaps = {};
 
+    // ---- 再平衡准备 ----
+    // 适用条件：组合含 2 个及以上单笔投资(single)计划，且全部为 single（其他定投方式不参与）
+    const rebalanceSection = document.getElementById('rebalanceSection');
+    const rebalanceEnable = rebalanceSection && document.getElementById('rebalanceEnable')
+        ? document.getElementById('rebalanceEnable').checked : false;
+    const rebalanceFreq = rebalanceSection && document.getElementById('rebalanceFreq')
+        ? document.getElementById('rebalanceFreq').value : 'month';
+    const rebalanceThreshold = rebalanceSection && document.getElementById('rebalanceThreshold')
+        ? (parseFloat(document.getElementById('rebalanceThreshold').value) || 0) : 0;
+    const singlePlans = investmentPlans.filter(p => p.type === 'single');
+    // 去重后的基金数：再平衡需在 ≥2 种不同基金间调仓，全部同一基金时无意义，不触发
+    const distinctFunds = new Set(singlePlans.map(p => p.fund)).size;
+    const canRebalance = rebalanceEnable && singlePlans.length >= 2 && singlePlans.length === investmentPlans.length && distinctFunds >= 2;
+    // 目标权重 = 各计划初始单笔金额占比（不新增字段，动态推导）
+    const totalSingle = singlePlans.reduce((s, p) => s + (parseFloat(p.amount) || 0), 0);
+    const targetWeight = {};
+    singlePlans.forEach(p => {
+        targetWeight[p.id] = totalSingle > 0 ? (parseFloat(p.amount) || 0) / totalSingle : 1 / singlePlans.length;
+    });
+    const planRebalanceEvents = {}; singlePlans.forEach(p => planRebalanceEvents[p.id] = []);
+    const rebalanceExecDates = [];     // 实际执行再平衡的日期（供结果摘要）
+    let rebalanceTotalTurnover = 0;    // 累计调仓规模（卖出+买入）
+    let prevRebalanceMonthKey = '';    // 用于按月份切换判定触发日
+
     for (let dtIdx = 0; dtIdx < allDates.length; dtIdx++) {
         const currentDt = allDates[dtIdx];
         const dateStr = allDateStrs[dtIdx];
@@ -770,6 +805,78 @@ function runBacktest() {
                 poolBalance += proceeds;   // 主动赎回到账回充资金池，可再投
                 if (beforeShares > 0) planCostBasis[plan.id] *= planShares[plan.id] / beforeShares;   // 按份额比例调减成本
                 planActiveRedeemEvents[plan.id].push({ dateStr, proceeds, nav, mode: ev.mode, holdShares });
+            }
+        }
+        // ---- 再平衡（组合内部调仓）：仅 canRebalance 且到达触发日时执行 ----
+        // 卖出超配回充现金 totalCash，再买入低配（受 totalCash 约束），不触碰外部 poolBalance，
+        // 也不写入外部 cashFlows（内部资金转移，XIRR 期末市值自动反映）。
+        if (canRebalance) {
+            const mKey = dateStr.slice(0, 7);          // 'yyyy-mm'
+            let isTrigger = false;
+            if (mKey !== prevRebalanceMonthKey) {
+                const mon = parseInt(dateStr.slice(5, 7), 10); // 1-12
+                if (rebalanceFreq === 'quarter') isTrigger = (mon - 1) % 3 === 0;
+                else if (rebalanceFreq === 'half') isTrigger = (mon - 1) % 6 === 0;
+                else if (rebalanceFreq === 'year') isTrigger = mon === 1;
+                else isTrigger = true;                    // month：每月首个切换日触发
+            }
+            if (mKey !== prevRebalanceMonthKey) prevRebalanceMonthKey = mKey;
+            if (isTrigger) {
+                // 当日各计划净值可得性
+                const reNav = {};
+                let allNavOk = true;
+                for (const plan of singlePlans) {
+                    let nav;
+                    if (doFill) nav = fundNavMap[plan.fund].get(dateStr);
+                    else { const idx = fundsData[plan.fund].dates.findIndex(d => formatDate(d) === dateStr); if (idx !== -1) nav = fundsData[plan.fund].nav[idx]; }
+                    if (nav === undefined) { allNavOk = false; break; }
+                    reNav[plan.id] = nav;
+                }
+                if (allNavOk) {
+                    let totalMv = 0;
+                    for (const plan of singlePlans) totalMv += planShares[plan.id] * reNav[plan.id];
+                    if (totalMv > 0) {
+                        const th = rebalanceThreshold / 100;
+                        const sells = [], buys = [];
+                        for (const plan of singlePlans) {
+                            const curW = (planShares[plan.id] * reNav[plan.id]) / totalMv;
+                            const tW = targetWeight[plan.id];
+                            if (th > 0 && Math.abs(curW - tW) <= th) continue;  // 未超阈值不动
+                            if (curW > tW) sells.push({ plan, nav: reNav[plan.id], targetMv: tW * totalMv });
+                            else if (curW < tW) buys.push({ plan, nav: reNav[plan.id], targetMv: tW * totalMv });
+                        }
+                        // 先统一卖出超配：回充 totalCash
+                        for (const s of sells) {
+                            const curMv = planShares[s.plan.id] * s.nav;
+                            let sellMv = curMv - s.targetMv;
+                            if (sellMv <= 0) continue;
+                            let sellShares = Math.min(planShares[s.plan.id], sellMv / s.nav);
+                            if (sellShares <= 0) continue;
+                            const proceeds = sellShares * s.nav;
+                            const beforeShares = planShares[s.plan.id];
+                            planShares[s.plan.id] -= sellShares;
+                            totalCash += proceeds;
+                            if (beforeShares > 0) planCostBasis[s.plan.id] *= planShares[s.plan.id] / beforeShares;
+                            rebalanceTotalTurnover += proceeds;
+                            planRebalanceEvents[s.plan.id].push({ dateStr, direction: 'sell', proceeds, nav: s.nav });
+                        }
+                        // 再统一买入低配：消耗 totalCash（现金充足时才买，资金不足买尽可能多）
+                        for (const b of buys) {
+                            const curMv = planShares[b.plan.id] * b.nav;
+                            let buyMv = b.targetMv - curMv;
+                            if (buyMv <= 0) continue;
+                            if (buyMv > totalCash) buyMv = totalCash;
+                            if (buyMv <= 0) continue;
+                            const buyShares = buyMv / b.nav;
+                            planShares[b.plan.id] += buyShares;
+                            totalCash -= buyMv;
+                            planCostBasis[b.plan.id] += buyMv;
+                            rebalanceTotalTurnover += buyMv;
+                            planRebalanceEvents[b.plan.id].push({ dateStr, direction: 'buy', amount: buyMv, nav: b.nav });
+                        }
+                        if (sells.length || buys.length) rebalanceExecDates.push(dateStr);
+                    }
+                }
             }
         }
         for (const plan of investmentPlans) {
@@ -978,7 +1085,8 @@ function runBacktest() {
         simDateStrs: allDateStrs, simNav: simNav, simDiv: simDiv, simDow: simDow, simDateTs: simDateTs, simDayOfMonth: simDayOfMonth, simStartIdx: startIdx,
         stopGainByFund, stopGainEvents, totalMaxPrincipal, totalRedeemedAll, maxPrincipalReturn, hasStopGainPlan, mdEvents, investEvents,
         activeRedeemByFund, activeRedeemEvents, totalActiveRedeemed, hasActiveRedeemPlan,
-        maxDDPeak: _m.maxDDPeak, maxDDTrough: _m.maxDDTrough, ddDurPeak: _m.ddDurPeak, ddDurTrough: _m.ddDurTrough };
+        maxDDPeak: _m.maxDDPeak, maxDDTrough: _m.maxDDTrough, ddDurPeak: _m.ddDurPeak, ddDurTrough: _m.ddDurTrough,
+        rebalance: { canRebalance, execDates: rebalanceExecDates, totalTurnover: rebalanceTotalTurnover, planEvents: planRebalanceEvents, freq: rebalanceFreq, threshold: rebalanceThreshold } };
 
     const twrHtml = isNaN(annualReturnPct) ? '-' : annualReturnPct.toFixed(2) + '%';
     const winHtml = isNaN(winRate) ? '-' : winRate.toFixed(1) + '%';
@@ -1007,6 +1115,65 @@ function runBacktest() {
         ${riskHtml}
         <div class="bg-amber-50 p-4 rounded-lg text-center cursor-help" data-mkey="峰值本金收益率"><div class="text-sm text-slate-500">峰值本金收益率</div><div class="text-2xl font-bold text-amber-700">${peakReturnVal.toFixed(2)}%</div></div>
     `;
+    // 再平衡摘要（仅在满足再平衡条件时展示）
+    const rebalanceSummaryEl = document.getElementById('rebalanceSummary');
+    if (rebalanceSummaryEl) {
+        const rbl = backtestResult.rebalance;
+        if (rbl && rbl.canRebalance) {
+            const freqLabel = ({ month: '月', quarter: '季', half: '半年', year: '年' })[rbl.freq] || '月';
+            const execN = (rbl.execDates || []).length;
+            const lastDate = execN > 0 ? rbl.execDates[execN - 1] : '-';
+            const turnover = rbl.totalTurnover || 0;
+            const thInfo = rbl.threshold > 0 ? `，偏离阈值 ${rbl.threshold}%` : '，完全调回';
+            rebalanceSummaryEl.innerHTML = `<div class="flex flex-wrap items-center gap-x-4 gap-y-1 text-sm text-gray-600 px-4 py-3 bg-indigo-50 rounded-lg border border-indigo-100">
+                <span class="font-medium text-indigo-700 cursor-help" title="悬停查看每次再平衡明细" data-rebalance-label>再平衡：</span>
+                <span>每${freqLabel}执行</span>
+                <span>执行 ${execN} 次</span>
+                <span>最后触发：${lastDate}</span>
+                <span>累计调仓：${turnover.toFixed(2)} 元${thInfo}</span>
+                <span class="text-xs text-gray-400">目标权重 = 各计划初始单笔金额占比；再平衡为组合内部调仓，不影响 XIRR 本金口径</span>
+            </div>`;
+            // 绑定再平衡明细浮窗：悬停"再平衡："显示每次执行的买卖明细
+            const rbTipEl = document.createElement('div');
+            rbTipEl.className = 'hidden absolute z-30 left-0 bottom-full mb-1 w-96 max-h-80 overflow-auto bg-white border border-indigo-300 rounded-lg shadow-xl p-3 text-sm';
+            rebalanceSummaryEl.appendChild(rbTipEl);
+            const rbLabel = rebalanceSummaryEl.querySelector('[data-rebalance-label]');
+            if (rbTipEl && rbLabel) {
+                const buildRebalanceDetail = function () {
+                    const _r = backtestResult.rebalance;
+                    const byDate = new Map();
+                    if (_r && _r.planEvents) {
+                        for (const pid in _r.planEvents) {
+                            const plan = investmentPlans.find(p => String(p.id) === String(pid));
+                            (_r.planEvents[pid] || []).forEach(ev => {
+                                if (!byDate.has(ev.dateStr)) byDate.set(ev.dateStr, []);
+                                byDate.get(ev.dateStr).push(Object.assign({ fund: plan ? plan.fund : '' }, ev));
+                            });
+                        }
+                    }
+                    let html = '';
+                    byDate.forEach((evs, ds) => {
+                        html += '<div class="mb-1 font-medium text-indigo-700">' + ds + '</div>';
+                        evs.forEach(e => {
+                            const cn = fundCodeName(e.fund);
+                            const amt = e.direction === 'sell' ? e.proceeds : e.amount;
+                            html += '<div class="text-gray-600 pl-2">' + (e.direction === 'sell' ? '卖出 ' : '买入 ') + cn.code + ' ' + amt.toFixed(2) + '元 @' + e.nav.toFixed(4) + '</div>';
+                        });
+                    });
+                    return html || '<div class="text-gray-500">无再平衡明细</div>';
+                };
+                let rbTimer = null;
+                const rbShow = () => { clearTimeout(rbTimer); rbTipEl.innerHTML = buildRebalanceDetail(); rbTipEl.classList.remove('hidden'); };
+                const rbHide = () => { rbTimer = setTimeout(() => rbTipEl.classList.add('hidden'), 150); };
+                rbLabel.addEventListener('mouseenter', rbShow);
+                rbLabel.addEventListener('mouseleave', rbHide);
+                rbTipEl.addEventListener('mouseenter', () => clearTimeout(rbTimer));
+                rbTipEl.addEventListener('mouseleave', rbHide);
+            }
+        } else {
+            rebalanceSummaryEl.innerHTML = '';
+        }
+    }
     // 资金池剩余/上限：显示在「可用最大资金池(元)」输入框左侧
     const comboPoolStatEl = document.getElementById('comboPoolStat');
     if (comboPoolStatEl) {

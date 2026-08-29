@@ -625,6 +625,21 @@ async function updateCharts() {
     const assetDcaData = chartDates.map((ds, i) => dcaByDate.has(ds) ? chartHoldAssets[i] : null);        // 灰色实心圆
     const assetSingleData = chartDates.map((ds, i) => singleByDate.has(ds) ? chartHoldAssets[i] : null); // 黑色实心圆
 
+    // 再平衡触发点聚合（用于组合总资产曲线菱形标注）：按日期聚合各计划买卖事件
+    const rebalanceByDate = new Map();
+    const _rbl = backtestResult.rebalance;
+    if (_rbl && _rbl.canRebalance && _rbl.planEvents) {
+        for (const pid in _rbl.planEvents) {
+            const plan = investmentPlans.find(p => String(p.id) === String(pid));
+            (_rbl.planEvents[pid] || []).forEach(ev => {
+                if (!rebalanceByDate.has(ev.dateStr)) rebalanceByDate.set(ev.dateStr, []);
+                rebalanceByDate.get(ev.dateStr).push(Object.assign({ fund: plan ? plan.fund : '' }, ev));
+            });
+        }
+    }
+    const hasRebalance = rebalanceByDate.size > 0;
+    const assetRebalanceData = chartDates.map((ds, i) => rebalanceByDate.has(ds) ? chartAssets[i] : null); // 靛蓝菱形，落在总资产曲线
+
     let benchmarkDataset = null;
     if (currentBenchmarkId && filtered.length > 0) {
         const benchmark = await db.benchmarks.get(currentBenchmarkId);
@@ -868,6 +883,20 @@ async function updateCharts() {
             isSingleMarker: true
         });
     }
+    if (hasRebalance) {
+        // 再平衡触发点菱形（靛蓝，区别于止盈红三角/回撤蓝三角），落在组合总资产曲线
+        assetDatasets.push({
+            label: '再平衡',
+            data: assetRebalanceData,
+            showLine: false,
+            pointStyle: 'rectRot',
+            pointRadius: 6,
+            pointHoverRadius: 8,
+            backgroundColor: '#6366f1',
+            borderColor: '#6366f1',
+            isRebalanceMarker: true
+        });
+    }
     assetChart = new Chart(assetCtx, {
         type: 'line', data: { labels: chartDates, datasets: assetDatasets },
         options: {
@@ -912,6 +941,16 @@ async function updateCharts() {
                                     s += (idx > 0 ? '; ' : '') + cn.code + ' 投入' + e.amt.toFixed(2) + '元';
                                 });
                                 return s;
+                            }
+                            if (context.dataset.isRebalanceMarker && context.parsed.y != null) {
+                                const evs = rebalanceByDate.get(chartDates[context.dataIndex]) || [];
+                                const lines = ['再平衡调仓：'];
+                                evs.forEach(function(e) {
+                                    const cn = fundCodeName(e.fund);
+                                    const amt = e.direction === 'sell' ? e.proceeds : e.amount;
+                                    lines.push((e.direction === 'sell' ? '卖出 ' : '买入 ') + cn.code + ' ' + amt.toFixed(2) + '元@' + e.nav.toFixed(4));
+                                });
+                                return lines;
                             }
                             return context.dataset.label + ': ' + context.parsed.y.toFixed(2) + ' 元';
                         }

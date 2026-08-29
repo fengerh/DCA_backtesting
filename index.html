@@ -3,7 +3,7 @@
 <head>
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
-    <title>基金投资工具 v20260809.1410</title>
+    <title>基金投资工具 v20260829.1130</title>
     <!-- 依赖库 -->
     <script src="js/xlsx.full.min.js"></script>
     <script src="https://cdn.jsdelivr.net/npm/chart.js@4.4.1/dist/chart.umd.min.js"></script>
@@ -129,6 +129,27 @@
                 </div>
                 <button onclick="runBacktest()" class="bg-green-600 text-white px-8 py-3 rounded-lg hover:bg-green-700 transition font-semibold text-lg">🚀 启动回测</button>
             </div>
+            <!-- 再平衡设置：仅当组合含 2 个及以上单笔投资计划时展示 -->
+            <div id="rebalanceSection" class="mt-4 pt-4 border-t border-gray-100 flex flex-wrap items-center gap-x-6 gap-y-3" style="display:none;">
+                <span class="text-sm font-medium text-gray-700">再平衡设置：</span>
+                <label class="flex items-center gap-2 text-sm text-gray-600 cursor-pointer">
+                    <input type="checkbox" id="rebalanceEnable" checked class="w-4 h-4"> 启用再平衡
+                </label>
+                <label class="flex items-center gap-2 text-sm text-gray-600 whitespace-nowrap">
+                    周期
+                    <select id="rebalanceFreq" class="p-2 border rounded-lg text-sm">
+                        <option value="month">每月</option>
+                        <option value="quarter">每季</option>
+                        <option value="half">每半年</option>
+                        <option value="year">每年</option>
+                    </select>
+                </label>
+                <label class="flex items-center gap-2 text-sm text-gray-600 whitespace-nowrap">
+                    允许偏离阈值(%)
+                    <input type="number" id="rebalanceThreshold" min="0" step="1" value="0" class="w-24 p-2 border rounded-lg text-sm" title="持仓占比偏离目标权重超过该值才调仓；0=每次都完全调回">
+                </label>
+                <span class="text-xs text-gray-400">目标权重 = 各计划初始单笔金额占比；仅适用于 2 种及以上单笔投资组合</span>
+            </div>
         </div>
 
         <!-- 4. 回测结果 -->
@@ -141,6 +162,7 @@
             <div id="metrics" class="grid grid-cols-1 md:grid-cols-5 gap-4 mb-6"></div>
             <div id="stopGainTip" class="hidden absolute z-30 right-0 bottom-0 mb-2 w-80 max-h-96 overflow-auto bg-white border border-amber-300 rounded-lg shadow-xl p-4 text-sm"></div>
             </div>
+            <div id="rebalanceSummary" class="mb-6 relative"></div>
 
             <!-- 盈利概率 -->
             <div id="profitProbabilitySection" class="bg-white p-6 rounded-xl shadow-md mb-6" style="display:none;">
