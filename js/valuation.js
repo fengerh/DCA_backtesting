@@ -162,8 +162,8 @@ function renderSingleValuation() {
     const dates = data.map(d => d.date);
     const navs = data.map(d => d.nav);
 
-    // 三个滚动年度（百分位窗口）：读有效值（空/<=0 跳过）；全为 0/空 则不画百分位线
-    const rollIds = ['valSingleRollYears1', 'valSingleRollYears2', 'valSingleRollYears3'];
+    // 两个滚动年度（百分位窗口）：读有效值（空/<=0 跳过）；全为 0/空 则不画百分位线
+    const rollIds = ['valSingleRollYears1', 'valSingleRollYears2'];
     const rollYears = [];
     for (const rid of rollIds) {
         const el = document.getElementById(rid);

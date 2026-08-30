@@ -59,7 +59,6 @@ function collectValuationState() {
         valSingleShowEnd: get('valSingleShowEnd'),
         valSingleRollYears1: get('valSingleRollYears1'),
         valSingleRollYears2: get('valSingleRollYears2'),
-        valSingleRollYears3: get('valSingleRollYears3'),
         valSingleMeanN: get('valSingleMeanN'),
         valSingleHi: get('valSingleHi'),
         valSingleLo: get('valSingleLo'),
@@ -171,7 +170,6 @@ function restoreValuationState(vs, idMap) {
     set('valSingleShowEnd', vs.valSingleShowEnd);
     set('valSingleRollYears1', vs.valSingleRollYears1);
     set('valSingleRollYears2', vs.valSingleRollYears2);
-    set('valSingleRollYears3', vs.valSingleRollYears3);
     set('valSingleMeanN', vs.valSingleMeanN);
     set('valSingleHi', vs.valSingleHi);
     set('valSingleLo', vs.valSingleLo);
@@ -1521,7 +1519,7 @@ function buildValuationReportInner() {
             ['指数', singleName],
             ['点位区间', (fmt(vs.valSingleStart) + ' ~ ' + fmt(vs.valSingleEnd))],
             ['展示区间', (fmt(vs.valSingleShowStart) + ' ~ ' + fmt(vs.valSingleShowEnd))],
-            ['滚动年度', [vs.valSingleRollYears1, vs.valSingleRollYears2, vs.valSingleRollYears3].filter(function (x) { return x && parseFloat(x) > 0; }).join(' / ') || '—'],
+            ['滚动年度', [vs.valSingleRollYears1, vs.valSingleRollYears2].filter(function (x) { return x && parseFloat(x) > 0; }).join(' / ') || '—'],
             ['百分位均值N', fmt(vs.valSingleMeanN)],
             ['阈值(高/低)', (fmt(vs.valSingleHi) + ' / ' + fmt(vs.valSingleLo))]
         ]) +
@@ -1561,7 +1559,7 @@ function buildValuationReportInner() {
         if (showEnd && showEnd > dataLast) showEnd = dataLast;
         var hi = parseFloat(vs.valSingleHi) || 80, lo = parseFloat(vs.valSingleLo) || 20;
         var meanN = parseInt(vs.valSingleMeanN, 10) || 0;
-        var rollYears = [vs.valSingleRollYears1, vs.valSingleRollYears2, vs.valSingleRollYears3]
+        var rollYears = [vs.valSingleRollYears1, vs.valSingleRollYears2]
             .map(function (x) { return parseFloat(x); })
             .filter(function (x) { return !isNaN(x) && x > 0; });
         var dates = data.map(function (d) { return d.date; });
