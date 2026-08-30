@@ -3,7 +3,7 @@
 <head>
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
-    <title>基金投资工具 v20260829.1130</title>
+    <title>基金投资工具 v20260830.1400</title>
     <!-- 依赖库 -->
     <script src="js/xlsx.full.min.js"></script>
     <script src="https://cdn.jsdelivr.net/npm/chart.js@4.4.1/dist/chart.umd.min.js"></script>
@@ -417,6 +417,7 @@
                             <label class="block text-xs text-gray-600 mb-1">基准指数</label>
                             <select id="valSingleIndex" class="w-full p-2 border rounded-lg text-sm" title="选择要分析估值的基准指数"></select>
                         </div>
+                        <div></div>
                         <div>
                             <label class="block text-xs text-gray-600 mb-1">点位开始日期</label>
                             <input type="date" id="valSingleStart" class="w-full p-2 border rounded-lg text-sm" title="点位展示区间的开始日期，空 = 全部数据">
@@ -426,12 +427,8 @@
                             <input type="date" id="valSingleEnd" class="w-full p-2 border rounded-lg text-sm" title="点位展示区间的结束日期，空 = 全部数据">
                         </div>
                         <div>
-                            <label class="block text-xs text-gray-600 mb-1">展示开始日期</label>
-                            <input type="date" id="valSingleShowStart" onchange="renderSingleValuation()" class="w-full p-2 border rounded-lg text-sm" title="独立图表展示区间的开始日期，仅控制显示，不影响百分位计算；空 = 随点位区间">
-                        </div>
-                        <div>
-                            <label class="block text-xs text-gray-600 mb-1">展示结束日期</label>
-                            <input type="date" id="valSingleShowEnd" onchange="renderSingleValuation()" class="w-full p-2 border rounded-lg text-sm" title="独立图表展示区间的结束日期，仅控制显示，不影响百分位计算；空 = 随点位区间">
+                            <label class="block text-xs text-gray-600 mb-1">点位百分位均值 N（日）</label>
+                            <input type="number" id="valSingleMeanN" value="20" min="0" step="1" class="w-full p-2 border rounded-lg text-sm" title="对点位做 N 日均线后再算滚动百分位，减少毛刺；0/空 = 直接用点位">
                         </div>
                     </div>
                     <div class="grid grid-cols-1 md:grid-cols-5 gap-3 items-end mt-3">
@@ -444,12 +441,12 @@
                             <input type="number" id="valSingleRollYears2" value="0" min="0" step="0.5" class="w-full p-2 border rounded-lg text-sm" title="当前点位相对它之前 N 年（滚动窗口，含当日）样本的百分位；0/空 = 不使用">
                         </div>
                         <div>
-                            <label class="block text-xs text-gray-600 mb-1">滚动年度③</label>
-                            <input type="number" id="valSingleRollYears3" value="0" min="0" step="0.5" class="w-full p-2 border rounded-lg text-sm" title="当前点位相对它之前 N 年（滚动窗口，含当日）样本的百分位；0/空 = 不使用">
+                            <label class="block text-xs text-gray-600 mb-1">展示开始日期</label>
+                            <input type="date" id="valSingleShowStart" onchange="renderSingleValuation()" class="w-full p-2 border rounded-lg text-sm" title="独立图表展示区间的开始日期，仅控制显示，不影响百分位计算；空 = 随点位区间">
                         </div>
                         <div>
-                            <label class="block text-xs text-gray-600 mb-1">点位百分位均值 N（日）</label>
-                            <input type="number" id="valSingleMeanN" value="20" min="0" step="1" class="w-full p-2 border rounded-lg text-sm" title="对点位做 N 日均线后再算滚动百分位，减少毛刺；0/空 = 直接用点位">
+                            <label class="block text-xs text-gray-600 mb-1">展示结束日期</label>
+                            <input type="date" id="valSingleShowEnd" onchange="renderSingleValuation()" class="w-full p-2 border rounded-lg text-sm" title="独立图表展示区间的结束日期，仅控制显示，不影响百分位计算；空 = 随点位区间">
                         </div>
                         <div>
                             <label class="block text-xs text-gray-600 mb-1">阈值 高/低 (%)</label>
